@@ -5,10 +5,14 @@ import torch
 from lightning.pytorch.callbacks import Callback
 
 
-class PlotMetricCallback(Callback):
+class CVRPMetricPlotCallback(Callback):
     """
     Plot training and validation metrics with matplotlib after each epoch
     and save them as PNGs in the current version folder (trainer.log_dir).
+
+    Optionally overlays a baseline as a horizontal red line:
+        - Concorde TSP baseline from pl_module.val_concorde_costs, or
+        - CVRP baseline from pl_module.val_cvrp_costs
     """
 
     def __init__(
@@ -58,9 +62,39 @@ class PlotMetricCallback(Callback):
         ax.plot(self.epochs, self.train_hist, marker="o", label=self.train_metric_key)
         ax.plot(self.epochs, self.val_hist, marker="o", label=self.val_metric_key)
 
+        # ---- Baseline overlay (Concorde for TSP or OR-Tools for CVRP) ----
+        baseline_cost = None
+        baseline_reward = None
+        baseline_label = None
+
+        if hasattr(pl_module, "val_concorde_costs"):
+            # TSP: mean optimal cost over the validation set (Concorde)
+            baseline_cost = pl_module.val_concorde_costs.mean().item()
+            baseline_label = "Concorde baseline"
+        elif hasattr(pl_module, "val_cvrp_costs"):
+            # CVRP: mean baseline cost over the validation set (e.g. OR-Tools)
+            baseline_cost = pl_module.val_cvrp_costs.mean().item()
+            baseline_label = "CVRP baseline"
+
+        if baseline_cost is not None:
+            # assuming reward = -cost
+            baseline_reward = -baseline_cost
+
+            ax.axhline(
+                baseline_reward,
+                color="red",
+                linestyle="--",
+                linewidth=1.5,
+                label=f"{baseline_label} (reward={baseline_reward:.3f})",
+            )
+            ax.set_title(
+                f"Train vs Val metrics | {baseline_label} cost ≈ {baseline_cost:.3f}"
+            )
+        else:
+            ax.set_title("Train vs Val metrics")
+
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Metric value")
-        ax.set_title("Train vs Val metrics")
         ax.grid(True, linestyle="--", alpha=0.8)
         ax.legend()
 
