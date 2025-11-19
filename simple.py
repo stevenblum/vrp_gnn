@@ -15,14 +15,20 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 generator = TSPGenerator(num_loc=50, loc_distribution="uniform")
 env = TSPEnv(generator)
 
-# Create policy (NO num_workers here)
-#policy = AttentionModelPolicy(env_name=env.name, num_encoder_layers=6)
+embed_dim = 256
+policy = AttentionModelPolicy(
+    env_name=env.name, 
+    num_encoder_layers=6,
+    embed_dim=embed_dim,)
 
+'''
 policy = AttentionModelPolicy(
     env_name="tsp",
-    embed_dim=128,
-    init_embedding=CustomTSPInitEmbedding(128, k_neighbors=5),
+    embed_dim=embed_dim,
+    init_embedding=CustomTSPInitEmbedding(embed_dim, k_neighbors=5),
+    num_encoder_layers=6
 )
+'''
 
 # RL model – put dataloader workers here
 model = POMO(
@@ -56,8 +62,8 @@ trainer = RL4COTrainer(
     accelerator="gpu",
     precision="16-mixed",
     callbacks=[plot_graphs_cb,plot_metric_cb, early_stop_cb],
-
 )
 
 trainer.fit(model,
-            ckpt_path="lightning_logs/version_10/checkpoints/epoch=29-step=46890.ckpt")
+            #ckpt_path="lightning_logs/version_10/checkpoints/epoch=29-step=46890.ckpt"
+            )
