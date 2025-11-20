@@ -14,6 +14,7 @@ def solve_cvrp_ortools(
     vehicle_capacity: float,
     num_vehicles: int | None = None,
     distance_scale: float = 1_000.0,
+    demand_scale: float = 1_000.0, 
     log_search: bool = False,
 ):
     """
@@ -46,7 +47,16 @@ def solve_cvrp_ortools(
         raise ValueError(
             f"Unexpected demands length {demands.shape[0]} for N_nodes={N_nodes}"
         )
-
+    
+    # ---- SCALE demands + capacity to ints for OR-Tools ----
+    demands_int = np.round(demands_full * demand_scale).astype(int)
+    cap_int = int(round(vehicle_capacity * demand_scale))
+    if cap_int <= 0:
+        raise ValueError(
+            f"Scaled capacity is {cap_int}. "
+            f"Check vehicle_capacity={vehicle_capacity} and demand_scale={demand_scale}."
+        )
+    
     # Number of customers (excluding depot)
     num_customers = N_nodes - 1
     if num_vehicles is None:
@@ -75,19 +85,19 @@ def solve_cvrp_ortools(
 
     transit_cb_idx = routing.RegisterTransitCallback(distance_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_cb_idx)
-
-    # Demand callback
+    
+    # Demand callback (now integer, nonzero)
     def demand_callback(from_index):
         node = manager.IndexToNode(from_index)
-        return int(demands_full[node])
+        return demands_int[node]
 
     demand_cb_idx = routing.RegisterUnaryTransitCallback(demand_callback)
 
     routing.AddDimensionWithVehicleCapacity(
         demand_cb_idx,
-        0,  # no capacity slack
-        [int(vehicle_capacity)] * num_vehicles,
-        True,  # start cumul at zero
+        0,
+        [cap_int] * num_vehicles,   # <-- use scaled capacity
+        True,
         "Capacity",
     )
 
@@ -132,8 +142,9 @@ def solve_cvrp_ortools(
         seg_lengths = np.linalg.norm(diffs, axis=1)
         total_cost += float(seg_lengths.sum())
 
-    return routes, total_cost
+    print(f"OR-Tools CVRP solution cost: {total_cost:.4f} with {num_vehicles} vehicles")
 
+    return routes, total_cost
 
 def cvrp_ortools_solutions_for_batch(
     td,
@@ -229,6 +240,10 @@ class CVRPValBaselineCallback(Callback):
         # If we've already computed the baseline once, nothing to do.
         if self.has_run:
             return
+        
+        if trainer.sanity_checking:
+            pl_module.print(["CVRPBaseline Does Not Execute During Sanity Check"])
+            return
 
         # Reset accumulators at the start of each validation epoch
         self._routes_acc = []
@@ -252,6 +267,9 @@ class CVRPValBaselineCallback(Callback):
         # If we've already computed and stored baseline, we do nothing.
         if self.has_run:
             return
+        
+        if trainer.sanity_checking:
+            return
 
         # respect optional max_batches for baseline computation
         if self.max_batches is not None and self._seen_batches >= self.max_batches:
@@ -259,8 +277,7 @@ class CVRPValBaselineCallback(Callback):
 
         # Run OR-Tools on this batch
         pl_module.print(
-            f"[CVRPBaseline] OR-Tools solving batch {batch_idx} "
-            f"(sanity_checking={trainer.sanity_checking})..."
+            f"[CVRPBaseline] OR-Tools solving batch {batch_idx} of validation..."
         )
 
         routes_b, costs_b = cvrp_ortools_solutions_for_batch(
@@ -287,6 +304,9 @@ class CVRPValBaselineCallback(Callback):
     def on_validation_epoch_end(self, trainer, pl_module) -> None:
         # If we've already computed baseline or we're in sanity check, do nothing
         if self.has_run or trainer.sanity_checking:
+            return
+        
+        if trainer.sanity_checking:
             return
 
         if not self._routes_acc:

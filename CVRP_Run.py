@@ -7,7 +7,7 @@ from CVRPMetricPlotCallback import CVRPMetricPlotCallback
 
 # Instantiate generator and environment (random CVRP)
 generator = CVRPGenerator(
-    num_loc=20,            # number of customers (depot added automatically)
+    num_loc=30,            # number of customers (depot added automatically)
     loc_distribution="uniform",
     min_demand=1,
     max_demand=10,
@@ -20,8 +20,8 @@ policy = AttentionModelPolicy(env_name=env.name, num_encoder_layers=6)
 model = POMO(
     env, 
     policy, batch_size=64, optimizer_kwargs={"lr": 1e-4},
-    train_data_size=10_000,   # or whatever you like
-    val_data_size=64,
+    train_data_size=1_000_000,   # or whatever you like
+    val_data_size=128,
 )
 
 # Add CVRP baseline callback
@@ -29,7 +29,7 @@ baseline_cb = CVRPValBaselineCallback(max_batches=2)
 plot_graph_cb = CVRPGraphPlotCallback(env, num_examples=5)
 plot_metric_cb = CVRPMetricPlotCallback()
 
-trainer = RL4COTrainer(max_epochs=5,
+trainer = RL4COTrainer(max_epochs=300,
                         callbacks=[baseline_cb, plot_graph_cb, plot_metric_cb],)
 
 trainer.fit(model)
