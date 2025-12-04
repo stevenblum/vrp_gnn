@@ -5,6 +5,7 @@ import vrplib
 import argparse
 import yaml
 from datetime import datetime
+import random
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -12,6 +13,7 @@ from types import MethodType
 
 from rl4co.envs.routing import CVRPEnv, CVRPGenerator
 from rl4co.models import AttentionModelPolicy, AttentionModel, POMO
+from rl4co.models.nn.graph.mpnn import MessagePassingEncoder
 from rl4co.utils import RL4COTrainer
 from rl4co.data.utils import load_npz_to_tensordict  # fast RL4CO loader :contentReference[oaicite:1]{index=1}
 from rl4co.data.dataset import TensorDictDataset
@@ -136,6 +138,14 @@ def main():
                         help='Override vehicle capacity; higher allows more customers per tour (default: 100.0)')
     parser.add_argument('--test_seed', type=int, default=1234,
                         help='Seed for generating fixed test set (default: 1234)')
+    parser.add_argument('--train_seed', type=str, default="7",
+                        help='Seed for training/generator (int or "random"). Default: 7')
+    parser.add_argument('--num_train_locs', type=int, default=None,
+                        help='Alias for num_loc_train (default: None)')
+    parser.add_argument('--train_set_clusters', type=int, default=3,
+                        help='Optional cluster count hint for training set sampler (if applicable)')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='Optional run name for logger subdir (default: derived from model config)')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='Training batch size (default: 64)')
     parser.add_argument('--train_data_size', type=int, default=2_000_000,
@@ -147,7 +157,7 @@ def main():
     parser.add_argument('--max_epochs', type=int, default=300,
                         help='Maximum number of training epochs (default: 300)')
     parser.add_argument('--normalization', type=str, default='batch',
-                        choices=['batch', 'layer', 'none'],
+                        choices=['batch', 'layer', 'instance', 'none'],
                         help='Normalization type for attention model (default: batch)')
     parser.add_argument('--limit_train_batches', type=float, default=None,
                         help='Limit fraction of training batches per epoch (default: None, use all)')
@@ -179,13 +189,27 @@ def main():
                         help='Precision for training (default: 16-mixed to save memory)')
     args = parser.parse_args()
 
+    # Resolve train seed (int or "random")
+    if isinstance(args.train_seed, str) and args.train_seed.lower() == "random":
+        for _ in range(1):
+            args.train_seed = random.randint(1, 10**9)
+    else:
+        args.train_seed = int(args.train_seed)
+    torch.manual_seed(args.train_seed)
+    random.seed(args.train_seed)
+    try:
+        import numpy as np
+        np.random.seed(args.train_seed)
+    except Exception:
+        pass
+
     # !!! Experiment Name, Pytorch Lightning Will Then Give the Version A Name !!!!
-    exp_name = f"emb{args.embedding_dim}_enc{args.num_encoder_layers}_attn{args.num_attn_heads}"
+    exp_name = args.run_name if args.run_name else f"emb{args.embedding_dim}_enc{args.num_encoder_layers}_attn{args.num_attn_heads}"
 
     val_loader, VAL_INSTANCES = create_val_loader()
 
-    loc_sampler = Mix_Multi_Distributions()
-    loc_sampler = Mix_Distribution(n_cluster=5)
+    #loc_sampler = Mix_Multi_Distributions()
+    loc_sampler = Mix_Distribution(n_cluster=args.train_set_clusters)
 
     generator = CVRPGenerator(
         num_loc=args.num_loc_train,
@@ -236,9 +260,27 @@ def main():
         }
     )
     '''
+    '''
+    mpnn_encoder = MessagePassingEncoder(
+        env_name=env.name,
+        embed_dim=args.embedding_dim//2,
+        num_nodes=args.num_loc_train,
+        num_layers=args.num_encoder_layers//3,
+    )
+    '''
     policy = AttentionModelPolicy(
         env_name=env.name, 
+        embed_dim=args.embedding_dim,
+        num_encoder_layers=args.num_encoder_layers,
+        num_heads=args.num_attn_heads,
+        normalization=args.normalization,
+        #train_decode_type=args.train_decode_type,
+        #val_decode_type=args.val_decode_type,
+        #test_decode_type=args.val_decode_type,
+        #temperature=args.train_temperature,
         )
+    
+
     model = POMO(
         env,
         policy=policy,
@@ -263,7 +305,7 @@ def main():
         version=run_id,
     )
     print(f"[INFO] Logging to: {logger.log_dir}")
-    '''
+    
     # Prepare all hyperparameters including argparse arguments
     def _sanitize_hparams(hparams: dict):
         """Convert any non-primitive values to strings so TensorBoard HParams accepts them."""
@@ -302,6 +344,8 @@ def main():
         "train_data_size": args.train_data_size,
         "test_data_size": args.test_data_size,
         "test_seed": args.test_seed,
+        "train_seed": args.train_seed,
+        "train_set_clusters": args.train_set_clusters,
         "limit_train_batches": args.limit_train_batches,
         "check_val_every_n_epoch": args.check_val_every_n_epoch,
         "checkpoint_after_epoch": args.checkpoint_after_epoch,
@@ -325,29 +369,36 @@ def main():
         "test_instances": VAL_INSTANCES,
     }
     
-    # Log to TensorBoard (include a dummy metric so HParams tab renders)
-    logger.log_hyperparams(hparams, metrics={"hp/placeholder": 0.0})
-    # Some TB frontends only show HParams when add_hparams is used; sanitize to primitives first
-    try:
-        logger.experiment.add_hparams(_sanitize_hparams(hparams), {"hp/placeholder": 0.0})
-        print("[INFO] add_hparams logged successfully")
-    except Exception as e:
-        print(f"[WARN] add_hparams failed: {e}")
-    
     # Save YAML file with all hyperparameters
     config_path = os.path.join(logger.log_dir, "config.yaml")
     os.makedirs(logger.log_dir, exist_ok=True)
     with open(config_path, 'w') as f:
         yaml.dump(hparams, f, default_flow_style=False, sort_keys=False)
     print(f"Configuration saved to: {config_path}")
-    '''
+    
+
+    hparams_log= {
+            "exp_embedding_dim": args.embedding_dim,
+            "exp_num_encoder_layers": args.num_encoder_layers,
+            "exp_num_attn_heads": args.num_attn_heads,
+            "exp_weight_decay": args.weight_decay,
+            "exp_vehicle_capacity": args.vehicle_capacity,
+            "exp_num_loc_train": args.num_loc_train,
+            "exp_train_set_clusters": args.train_set_clusters,
+        }
+    
+    print("\n\n\nHYPERPARAMS TO LOG:", hparams_log,"\n\n")
+    # Log hyperparameters with a starter hp_metric so HParams tab is populated
+    def _sanitize_hparams_log(d):
+        primals = (int, float, str, bool, type(None))
+        return {k: (v if isinstance(v, primals) else str(v)) for k, v in d.items()}
+    logger.log_hyperparams(_sanitize_hparams_log(hparams_log), metrics={"hp_metric": 0.0})
 
     # Now create callbacks with logger
     plot_metric_cb = CVRPMetricPlotCallback()
     train_plot_graph_cb = CVRPTrainGraphPlotCallback(env, num_examples=5)
 
-    '''
-    val_plot_graph_cb = CVRPLibGraphPlotCallback(
+    '''    val_plot_graph_cb = CVRPLibGraphPlotCallback(
         env,
         instance_names=VAL_INSTANCES,
         sol_base_dir="cvrplib_instances/X/",  # folder with X-n101-k25.sol etc.
@@ -366,11 +417,9 @@ def main():
         verbose=True,
         dirpath=os.path.join(logger.log_dir, "checkpoints"),
     )
-
-    rich_model_cb = RichModelSummary(max_depth=3)
     
     callback_list = [checkpoint_cb, 
-                     rich_model_cb,
+                     #rich_model_cb,
                      #baseline_cb,
                      train_plot_graph_cb,
                      #val_plot_graph_cb, 
@@ -391,8 +440,9 @@ def main():
 
     print(VAL_INSTANCES)
     model.dataloader_names = VAL_INSTANCES
-
+    
     trainer.fit(model, val_dataloaders=val_loader)
+
 
 if __name__ == "__main__":
     import multiprocessing as mp

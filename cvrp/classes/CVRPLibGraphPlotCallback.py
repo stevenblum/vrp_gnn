@@ -161,11 +161,10 @@ class CVRPLibGraphPlotCallback(Callback):
         return locs
 
     @staticmethod
-    def _plot_nodes(ax, locs_np, demand=None, probs=None):
+    def _plot_nodes(ax, locs_np, demand=None):
         """
         locs_np: numpy array [1+N, 2], node 0 = depot
         demand: optional numpy array [N]
-        probs: optional numpy array [N]
         """
         depot = locs_np[0]
         cust = locs_np[1:]
@@ -174,12 +173,6 @@ class CVRPLibGraphPlotCallback(Callback):
         if demand is not None:
             for idx, (x, y) in enumerate(cust):
                 ax.text(x + 0.005, y + 0.005, f"{demand[idx]:.2f}", fontsize=6, color="dimgray")
-        if probs is not None and probs.size > 0:
-            bar_width = 0.01
-            for (x, y), p in zip(cust, probs):
-                height = float(p)
-                ax.add_patch(plt.Rectangle((x - bar_width / 2, y), bar_width, height, color="cornflowerblue", alpha=0.7))
-                ax.text(x, y + height + 0.005, f"{p:.2f}", fontsize=6, ha="center", va="bottom", color="navy")
         ax.set_aspect("equal", adjustable="box")
 
     @staticmethod
@@ -205,6 +198,45 @@ class CVRPLibGraphPlotCallback(Callback):
         return counts
 
     @staticmethod
+    def _delivered_for_route(route, demand_vec):
+        if demand_vec is None:
+            return None
+        delivered = 0.0
+        for node in route:
+            if node > 0 and node - 1 < len(demand_vec):
+                delivered += float(demand_vec[node - 1])
+        return delivered
+
+    @staticmethod
+    def _align_demand_with_locs(td: TensorDict):
+        """Ensure demand length matches number of customer nodes (locs minus depot)."""
+        if "locs" not in td.keys() or "demand" not in td.keys():
+            return td
+        locs = td["locs"]
+        dem = td["demand"]
+        # Ensure demand has batch dim
+        if dem.ndim == locs.ndim - 1:
+            dem = dem.unsqueeze(0)
+        # If demand has an extra leading singleton batch, squeeze it
+        if dem.shape[0] == 1 and dem.shape[0] != locs.shape[0]:
+            dem = dem.squeeze(0)
+        desired = max(0, locs.shape[-2] - 1)
+        dem_len = dem.shape[-1]
+        td = td.clone()
+        if dem_len > desired:
+            dem = dem[..., :desired]
+        elif dem_len < desired:
+            pad = torch.zeros(
+                *dem.shape[:-1],
+                desired - dem_len,
+                device=dem.device,
+                dtype=dem.dtype,
+            )
+            dem = torch.cat((dem, pad), dim=-1)
+        td.set("demand", dem)
+        return td
+
+    @staticmethod
     def _routes_length(locs_np, routes):
         """Compute total length for list of routes in CURRENT locs space."""
         total = 0.0
@@ -216,10 +248,26 @@ class CVRPLibGraphPlotCallback(Callback):
             total += np.sqrt((diffs ** 2).sum(axis=1)).sum()
         return float(total)
 
+    @staticmethod
+    def _sanitize_routes(routes, max_idx):
+        """Clip/clean routes to valid node indices [0, max_idx]."""
+        clean = []
+        for r in routes or []:
+            r_clean = [min(max(0, int(n)), max_idx) for n in r]
+            if r_clean and r_clean[0] != 0:
+                r_clean = [0] + r_clean
+            if r_clean and r_clean[-1] != 0:
+                r_clean = r_clean + [0]
+            if len(r_clean) >= 2:
+                clean.append(r_clean)
+        return clean
+
     # ---------------- Lightning hook ----------------
 
     def on_validation_epoch_end(self, trainer, pl_module):
         if not trainer.is_global_zero:
+            return
+        if getattr(trainer, "sanity_checking", False):
             return
 
         self._ensure_out_dir(trainer)
@@ -234,58 +282,63 @@ class CVRPLibGraphPlotCallback(Callback):
             for batch in val_loader:
                 if batch is None:
                     continue
-                batch = batch.to(device)
-
-                # Create a temporary environment for this batch size
-                # Since validation instances may have different sizes than training
-                num_loc_val = batch["locs"].shape[1]  # number of customer locations
-                
-                # Extract capacity from batch if available, otherwise use default
-                if "capacity" in batch.keys():
-                    # Capacity is already in the batch from the npz file
-                    capacity = batch["capacity"]
-                else:
-                    # Default capacity of 1.0 (since demand is already normalized)
-                    capacity = torch.ones(batch.batch_size[0], device=device)
-                
-                from rl4co.envs.routing import CVRPEnv, CVRPGenerator
-                temp_generator = CVRPGenerator(num_loc=num_loc_val, capacity=capacity.item() if capacity.numel() == 1 else 1.0)
-                temp_env = CVRPEnv(temp_generator)
-                
-                # Reset with the temporary env to get proper state
-                td = temp_env.reset(batch)
+                td = batch.clone().to(device)
+                # Ensure batch dimension present
+                if td.batch_size == torch.Size([]):
+                    td = batchify_td(td)
+                # Align demand/locs (customers = locs-1)
+                td = self._align_demand_with_locs(td)
 
                 # Make sure reward exists to avoid errors
                 if "reward" not in td.keys():
                     td.set("reward", torch.zeros(td.batch_size, device=td.device))
 
-                # Run our own sampling eval: num_samples=eval_num_samples, temperature=eval_temperature
-                # Repeat the single instance num_samples times
-                td_batched = batchify_td(td)
-                td_batched = TensorDict.cat(
-                    [td_batched.clone() for _ in range(self.eval_num_samples)], dim=0
-                )
-                out = pl_module.policy(
-                    td_batched.clone(),
-                    phase="test",
-                    decode_type="sampling",
-                    temperature=self.eval_temperature,
-                    return_actions=True,
-                    calc_reward=True,
-                )
-                rewards_out = out.get("reward", None)
-                actions = out.get("actions", None)
-                if actions is None or rewards_out is None:
-                    continue
-                actions = actions.cpu()
-                rewards_out = rewards_out.cpu()
-                # Group rewards by original batch (B=1) and take best over samples
-                bs = td.batch_size[0]
-                rewards_grouped = rewards_out.split(bs)
-                rewards_stacked = torch.stack(rewards_grouped, dim=1)  # [num_samples, B]
-                best_vals, best_idx = rewards_stacked.max(dim=0)       # [B]
+                # Run our own sampling eval in chunks to avoid OOM
+                max_chunk_samples = 128
+                num_chunks = (self.eval_num_samples + max_chunk_samples - 1) // max_chunk_samples
 
-                B = actions.shape[0]
+                best_vals = None
+                best_actions = None
+                bs = td.batch_size[0]
+
+                remaining = self.eval_num_samples
+                while remaining > 0:
+                    samples_per_chunk = min(max_chunk_samples, remaining)
+                    remaining -= samples_per_chunk
+                    td_batched = TensorDict.stack(
+                        [td.clone() for _ in range(samples_per_chunk)], dim=0
+                    )
+                    out = pl_module.policy(
+                        td_batched.clone(),
+                        phase="test",
+                        decode_type="sampling",
+                        temperature=self.eval_temperature,
+                        return_actions=True,
+                        calc_reward=True,
+                    )
+                    rewards_out = out.get("reward", None)
+                    actions_chunk = out.get("actions", None)
+                    if actions_chunk is None or rewards_out is None:
+                        continue
+                    rewards_out = rewards_out.cpu()
+                    actions_chunk = actions_chunk.cpu()
+                    rewards_grouped = rewards_out.split(bs)
+                    rewards_stacked = torch.stack(rewards_grouped, dim=1)  # [samples_per_chunk, B]
+                    chunk_best_vals, chunk_best_idx = rewards_stacked.max(dim=0)  # [B]
+
+                    # Track best across chunks
+                    if best_vals is None:
+                        best_vals = chunk_best_vals
+                        best_actions = [actions_chunk[chunk_best_idx[i] + i * samples_per_chunk] for i in range(bs)]
+                    else:
+                        for i in range(bs):
+                            if chunk_best_vals[i] > best_vals[i]:
+                                best_vals[i] = chunk_best_vals[i]
+                                best_actions[i] = actions_chunk[chunk_best_idx[i] + i * samples_per_chunk]
+
+                if best_vals is None or best_actions is None:
+                    continue
+                B = len(best_actions)
 
                 for i in range(B):
                     td_i = td[i].cpu()
@@ -312,18 +365,18 @@ class CVRPLibGraphPlotCallback(Callback):
                             demand_np = demand_np[1:]
                         elif demand_np.shape[-1] != num_customers:
                             demand_np = demand_np[..., :num_customers]
-                    probs = self._actions_to_probs(actions[i], num_customers).numpy()
 
                     # ---- DISTANCE CORRECTION ----
                     # Recompute BKS cost on normalized coords so it's comparable to model cost
                     if bks_routes is not None and len(bks_routes) > 0:
+                        bks_routes = self._sanitize_routes(bks_routes, locs_full.shape[0] - 1)
                         bks_cost_norm = self._routes_length(locs_full, bks_routes)
                     else:
                         bks_cost_norm = None
 
                     # Model routes + cost (also in normalized coords)
                     # Select best actions according to reward
-                    act_i = actions[best_idx[i] + i * self.eval_num_samples]
+                    act_i = best_actions[i]
                     model_routes = self._split_model_routes(act_i)
                     reward_val = best_vals[i].item()
                     model_cost = -reward_val
@@ -374,11 +427,15 @@ class CVRPLibGraphPlotCallback(Callback):
                             first_customer = route[1]
                             if first_customer != 0:
                                 bks_color_by_first[first_customer] = color
+                            delivered = self._delivered_for_route(route, demand_np)
+                            if delivered is not None:
+                                end_xy = coords[-2]
+                                ax_bks.text(end_xy[0], end_xy[1], f"{delivered:.2f}", fontsize=7, color=color)
                     else:
                         ax_bks.set_title("BKS unavailable")
 
                     # ----- Model axis -----
-                    self._plot_nodes(ax_model, locs_full, demand=demand_np, probs=probs)
+                    self._plot_nodes(ax_model, locs_full, demand=demand_np)
 
                     fallback_colors = cycle(
                         plt.rcParams["axes.prop_cycle"].by_key()["color"]
@@ -394,6 +451,10 @@ class CVRPLibGraphPlotCallback(Callback):
                             ax_model, coords,
                             linestyle="-", linewidth=2.0, color=color, alpha=0.95
                         )
+                        delivered = self._delivered_for_route(r, demand_np)
+                        if delivered is not None:
+                            end_xy = coords[-2]
+                            ax_model.text(end_xy[0], end_xy[1], f"{delivered:.2f}", fontsize=7, color=color)
 
                     if bks_cost_norm is not None and bks_cost_norm > 0:
                         gap_pct = 100.0 * (model_cost - bks_cost_norm) / bks_cost_norm

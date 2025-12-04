@@ -64,7 +64,7 @@ class CVRPTrainGraphPlotCallback(Callback):
         return locs
 
     @staticmethod
-    def _plot_nodes(ax, locs, demand=None, probs=None):
+    def _plot_nodes(ax, locs, demand=None):
         depot = locs[0]
         cust = locs[1:]
         ax.scatter(cust[:, 0], cust[:, 1], s=14)
@@ -72,12 +72,6 @@ class CVRPTrainGraphPlotCallback(Callback):
         if demand is not None:
             for idx, (x, y) in enumerate(cust):
                 ax.text(x + 0.005, y + 0.005, f"{demand[idx]:.2f}", fontsize=6, color="dimgray")
-        if probs is not None and probs.size > 0:
-            bar_width = 0.01
-            for (x, y), p in zip(cust, probs):
-                height = float(p)
-                ax.add_patch(plt.Rectangle((x - bar_width / 2, y), bar_width, height, color="cornflowerblue", alpha=0.7))
-                ax.text(x, y + height + 0.005, f"{p:.2f}", fontsize=6, ha="center", va="bottom", color="navy")
         ax.set_aspect("equal", adjustable="box")
 
     @staticmethod
@@ -100,6 +94,16 @@ class CVRPTrainGraphPlotCallback(Callback):
         if total > 0:
             counts /= total
         return counts
+
+    @staticmethod
+    def _delivered_for_route(route, demand_vec):
+        if demand_vec is None:
+            return None
+        delivered = 0.0
+        for node in route:
+            if node > 0 and node - 1 < len(demand_vec):
+                delivered += float(demand_vec[node - 1])
+        return delivered
 
     def on_train_epoch_end(self, trainer, pl_module):
         if not trainer.is_global_zero:
@@ -140,8 +144,6 @@ class CVRPTrainGraphPlotCallback(Callback):
             locs_full = self._full_locs_from_td(td_i).numpy()  # [1+N, 2]
             demand = td_i.get("demand", None)
             demand_np = demand.numpy() if demand is not None else None
-            num_customers = locs_full.shape[0] - 1
-            probs = self._actions_to_probs(actions[i], num_customers).numpy()
 
             fig, ax = plt.subplots(1, 1, figsize=(6, 6))
 
@@ -158,9 +160,13 @@ class CVRPTrainGraphPlotCallback(Callback):
                     linestyle="-", linewidth=2.0,
                     color=next(colors), alpha=0.95
                 )
+                delivered = self._delivered_for_route(r, demand_np)
+                if delivered is not None:
+                    end_xy = coords[-2]  # last customer before depot
+                    ax.text(end_xy[0], end_xy[1], f"{delivered:.2f}", fontsize=7, color="black")
 
-            # ---- 2) Plot nodes, demands, and probability bars ----
-            self._plot_nodes(ax, locs_full, demand=demand_np, probs=probs)
+            # ---- 2) Plot nodes and demands ----
+            self._plot_nodes(ax, locs_full, demand=demand_np)
 
             ax.set_aspect("equal", adjustable="box")
             ax.set_title(f"Train sample {i} | Epoch {trainer.current_epoch}")
