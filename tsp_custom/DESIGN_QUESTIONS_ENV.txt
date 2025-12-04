@@ -1,0 +1,264 @@
+================================================================================
+ENVIRONMENT IMPLEMENTATION QUESTIONS
+================================================================================
+
+
+
+USER RESPONSE: Ok, I see you output some questions about the envrionemnt. I agree with all of your reccomended solutions. Please update the DESIGN_ARCHITECTURE.txt file with these specifics. Make the updates as short and concise as possible while include necessary details that will be relevents for future development efforts.
+
+Date: 2025-11-22
+Context: Implementing CustomTSPEnv for Step 3 of USER_DEVELOPMENT_PLAN.txt
+
+These questions arose during the minimal viable implementation of the custom
+environment. Answers will help finalize implementation details.
+
+================================================================================
+
+Q1: ACTION REPRESENTATION FORMAT
+---------------------------------
+The architecture document specifies actions as (action_type, node_i, node_j).
+However, rl4co environments typically expect actions as a single tensor.
+
+OPTIONS:
+A) Use a single integer action index that we decode internally:
+   - Index 0 to N*(N-1)/2-1: ADD actions (for each pair i<j)
+   - Index N*(N-1)/2 to N*(N-1)/2+num_edges-1: DELETE actions
+   - Index N*(N-1)/2+num_edges: DONE action
+   - PRO: Standard rl4co format, works with existing policies
+   - CON: Variable action space size (DELETE actions change)
+
+B) Use a tuple/list of 3 integers: [action_type, node_i, node_j]:
+   - action_type: 0=ADD, 1=DELETE, 2=DONE
+   - PRO: Explicit, easier to understand and debug
+   - CON: Non-standard for rl4co, may need custom policy handling
+
+C) Use a TensorDict action with named fields:
+   - td_action['type'], td_action['node_i'], td_action['node_j']
+   - PRO: Most explicit, type-safe
+   - CON: Most non-standard, significant custom policy needed
+
+RECOMMENDATION: Option A (single integer with internal decoding)
+- This is most compatible with rl4co's existing infrastructure
+- We can provide helper functions to decode actions for visualization
+- The variable action space is handleable with proper masking
+
+
+Q2: EDGE STORAGE FORMAT
+-----------------------
+How should we store selected edges internally?
+
+OPTIONS:
+A) Full adjacency matrix (N x N):
+   - PRO: Fast edge existence checks, easy to update degrees
+   - CON: Memory inefficient (N² storage for ~N edges)
+
+B) Edge list with fixed size (max_edges x 2):
+   - Store pairs of node indices
+   - Track number of active edges separately
+   - PRO: Memory efficient for sparse graphs
+   - CON: Need to search list for edge existence checks
+
+C) Both adjacency matrix AND edge list:
+   - Use adjacency for fast lookups and degree tracking
+   - Use edge list for iteration (DELETE actions, reward calculation)
+   - PRO: Best of both worlds
+   - CON: Must keep both synchronized
+
+RECOMMENDATION: Option C (both adjacency and edge list)
+- Adjacency matrix is small for N≤100 (40KB for N=100)
+- Fast operations are critical for training speed
+- Edge list makes DELETE masking and reward calculation easier
+
+
+Q3: POLAR COORDINATE COMPUTATION TIMING
+----------------------------------------
+When should we compute the polar coordinates (theta, d) for node features?
+
+OPTIONS:
+A) Compute on-the-fly in _step():
+   - Recalculate theta/d for affected nodes after each action
+   - PRO: Always up-to-date
+   - CON: Repeated computation (same nodes may be recomputed)
+
+B) Compute once in _reset() and update incrementally:
+   - Track which nodes changed and only update those
+   - PRO: More efficient
+   - CON: More complex bookkeeping
+
+C) Compute in a separate update_node_features() function called after _step():
+   - Encapsulates the logic
+   - PRO: Clean separation of concerns
+   - CON: Need to ensure it's always called
+
+RECOMMENDATION: Option C (separate update function)
+- Keeps _step() clean and focused
+- Easy to test independently
+- Can optimize internally without affecting step logic
+
+
+Q4: CONNECTIVITY CHECKING EFFICIENCY
+-------------------------------------
+Connectivity checking for DONE mask can be expensive (BFS on each step).
+
+OPTIONS:
+A) Check every step:
+   - PRO: Always accurate
+   - CON: Expensive O(N) operation per step
+
+B) Check only when all degrees == 2:
+   - Only run BFS when tour could be valid
+   - PRO: Amortized cost is low (rare event)
+   - CON: Need to track degree condition
+
+C) Use incremental connectivity tracking (Union-Find):
+   - Maintain connected components as edges are added/deleted
+   - PRO: O(α(N)) per operation (nearly constant)
+   - CON: More complex, harder to debug
+
+D) Delay check until DONE is attempted:
+   - Only check connectivity when agent tries to select DONE
+   - Reject DONE if not connected
+   - PRO: Minimal overhead during episode
+   - CON: Might confuse learning (DONE sometimes masked, sometimes not)
+
+RECOMMENDATION: Option B (check only when degrees == 2)
+- This is the design architecture recommendation
+- Degrees check is O(N) but very fast
+- BFS is only run when potentially valid (rare)
+- Start with this, profile, and optimize to C if needed
+
+
+Q5: STARTING EDGE INITIALIZATION FOR POMO
+------------------------------------------
+How to select diverse starting edges for POMO trajectories?
+
+OPTIONS:
+A) K shortest edges:
+   - PRO: Deterministic, simple
+   - CON: May not be diverse (all in same region)
+
+B) K random edges:
+   - PRO: Simple to implement
+   - CON: May have low diversity by chance
+
+C) Grid-based selection:
+   - Divide space into K regions, pick one edge from each
+   - PRO: Guaranteed spatial diversity
+   - CON: Depends on node distribution
+
+D) Greedy diversity maximization:
+   - Iteratively select edges that maximize min distance to existing selections
+   - Use edge midpoints for distance calculation
+   - PRO: Maximum diversity as designed
+   - CON: O(K² * N²) selection time
+
+E) Simple round-robin by index:
+   - Edge k = nodes (k, (k+K) mod N)
+   - PRO: Very fast, deterministic
+   - CON: Not based on graph structure
+
+RECOMMENDATION: Start with E (round-robin), upgrade to D if needed
+- For minimal viable product, simplicity is key
+- Round-robin ensures no overlap in starting edges
+- Can profile and add diversity optimization later
+- For now, focus on getting the core mechanics working
+
+
+Q6: MINIMAL VIABLE FEATURE SET
+-------------------------------
+For the initial implementation, which features should we include?
+
+CORE (MUST HAVE for Step 3):
+- Basic node coordinates
+- Adjacency matrix for edge tracking
+- Degree tracking
+- Action masking (ADD/DELETE/DONE)
+- Reward calculation (tour length + deletion penalty)
+- Validity checking (degrees + connectivity)
+- Step counter and deletion counter
+
+DEFERRED (can add in later steps):
+- Polar coordinates (theta, d) for node features
+  → Add when implementing policy network (Step 6)
+- Action history tracking
+  → Add when policy needs it
+- POMO multi-start initialization
+  → Add after basic environment works
+- Sophisticated starting edge selection
+  → Add after POMO basics work
+
+RECOMMENDATION: Start with CORE features only
+- Get basic environment working and tested first
+- Add polar coordinates when we implement the policy (it will need them)
+- Add POMO features incrementally with testing
+- This follows "minimal viable" principle
+
+
+Q7: LOGGING GRANULARITY
+------------------------
+How detailed should logging be in the environment?
+
+OPTIONS:
+A) Log every action:
+   - PRO: Maximum debugability
+   - CON: Huge log files, slow training
+
+B) Log episode summaries only:
+   - PRO: Reasonable log size
+   - CON: Hard to debug specific steps
+
+C) Conditional logging (based on log level):
+   - DEBUG: Log every action
+   - INFO: Log episode summaries
+   - WARNING: Log only issues
+   - PRO: Configurable verbosity
+   - CON: Need to implement different levels
+
+RECOMMENDATION: Option C (conditional logging)
+- Use rl4co's pylogger (already imported)
+- DEBUG level for step-by-step in development
+- INFO level for training (episode summaries)
+- This is standard practice and very flexible
+
+
+Q8: REWARD SCALE
+-----------------
+Should we normalize or scale rewards?
+
+Current design: reward = -(tour_length + deletion_penalty + limit_penalty)
+
+For N=50 uniform [0,1] instance:
+- Typical tour length: ~5-7
+- Deletion penalty (0.2% avg dist): ~0.001 per deletion
+- This seems reasonable for learning
+
+QUESTION: Should we normalize by problem size or distance?
+- Option A: No normalization (use raw values)
+- Option B: Normalize by average pairwise distance
+- Option C: Normalize by problem size (N)
+
+RECOMMENDATION: Option A (no normalization) initially
+- rl4co models typically handle raw tour lengths
+- Can add normalization later if learning is unstable
+- Monitor reward magnitudes during initial testing
+
+
+================================================================================
+PROPOSED MINIMAL VIABLE IMPLEMENTATION
+================================================================================
+
+Based on the above analysis, the minimal environment will:
+
+1. Use single integer action indices (decoded internally)
+2. Store both adjacency matrix and edge list
+3. Update node features in separate function (deferred to later)
+4. Check connectivity only when degrees == 2
+5. Use round-robin starting edge initialization
+6. Include CORE features only (defer polar coordinates)
+7. Use conditional logging via pylogger
+8. Use raw reward values (no normalization)
+
+Additional features (polar coordinates, action history, sophisticated POMO)
+will be added incrementally in subsequent development steps.
+
+================================================================================

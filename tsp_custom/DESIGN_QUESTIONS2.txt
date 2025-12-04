@@ -1,0 +1,867 @@
+================================================================================
+CUSTOM POMO WITH GLOBAL EDGE SELECTION AND DELETION - DESIGN PLAN V2
+================================================================================
+
+PROMPT: Please read, and understand DESIGN_QUESTIONS1.txt file that is attached in the context. Ok, lets rename that file DESIGN_QUESTIONS1.TXT. Here are my answers. Q 1, I would like hard constraints, that include masking to prevent more than two edges being selected for one nods, AND mask out deletion actions if nodes are not already selected. I am a little unsure about how the masking will work like this; we many need some embeddings for deletion actions and some embedding for additions; or maybe you have a better proposal. Q 2, There should be a self termination action, there should also be a fixed limit at 2N with a large penalty, and there should be a relativly small penalty, 0.2 percent of average problem distance, for each deletion used. Q 3, I would like to go with alternative A, Multi-Head Architecture, with 3 heads. Q 4 a, For the proposed stated, please use everything you have listed and add the previous 3 actions. Q 4 b, Encoding Options, Lets go with the node centric reccomendation, plus can you add 4 spots for the realitve direction and distance of the connections in polar coordinates, so it looks like, theta 1, d 1, theta 2, d 2, if the connections dont exist yet I guss they should be zeros, or maybe there is a better way to represent that. Q 5, Reward should be sparse, only at end, with a similar multi start greedy strategy that POMO already uses. Q 6, I think I addressed this with Q 4 b, mask the unavailibile additions and deletions, however the details of this maybe challenging with teh node centric embedding. Masking might be easier if we chose a edge centric embedding. Q 7, I think scalability wont be an issue if we can use the node centric approach, so lets really try to devise a method to use the node centric approach. Q 8, Yes standard POMO multi start greedy, chosing a starting edge. Q 8 thoughts, To make the POMO multi start strategy effective, during training we should make sure to mask the deletion of the startin node, to make sure that the model can't delete it, this should make sure we get some variation in our output. Q 9, Thanks, this is good info, no adjustments needed. 10 a, At the beginning of training, can we do something to make additions more likely than deletions. As training progresses, I think the small penalty for deletions, 0.2 percent of average problem distance, will make model find a sweet spot in terms using deletions effectivly. 10 b, We will have the hard limit for this. 10 c, Can we mask DONE until a valid tour exists? OK, please take the answer the questions I just gave you, and lets create a DESIGN_QUESTIONS2.txt file. Please update the proposed architechure, and then ask any more question we need the answers to before we start to build the custom classes that we will need.
+
+USER RESPONSE TO THIS DOCUMENT: User answers to questions in DESIGN_QEUSTIONS2.txt. 1, Theta should be absolute, east=0 degrees. 2, Please include aboslute distances to the neighbors, the problem will already be normalized appropriatly. 3, For the polar coordinates for two connected edges, lets put the closer connection first. Ok, I think we have answered a lot of questions. Please create a final, DESIGN_ARCHITECTURE.txt file that will document how we want to proceed with development. There will be opportunities to ask more questions as we advance through the development setps outlines in the USER_DEVELOPMENT_PLAN.txt. We are currently in setp 1, and hopefully progressing to step 2.
+
+Date: 2025-11-22
+Purpose: Modify POMO for TSP to support:
+  1. Adding ANY edge in the graph (not just from current position)
+  2. Deleting previously added edges
+  3. Enable global reasoning similar to greedy heuristics
+
+================================================================================
+DESIGN DECISIONS - YOUR ANSWERS
+================================================================================
+
+1. VALIDITY CONSTRAINTS: ✓ DECIDED
+------------------------------------------
+DECISION: Hard constraints with masking
+  - Mask to prevent more than two edges being selected for one node
+  - Mask out deletion actions if nodes are not already selected
+  
+IMPLEMENTATION NOTES:
+  - Need careful design for embedding structure to support both addition and 
+    deletion masking
+  - QUESTION: You mentioned uncertainty about embeddings for deletion vs addition.
+    Two approaches to consider:
+    
+    Approach A: Unified Node Embedding with Dynamic Action Heads
+      - Single node embedding used by both addition and deletion decoders
+      - Addition Head: Scores all possible edges (i,j) not currently selected
+      - Deletion Head: Scores only currently selected edges
+      - Masking happens at decoder output level
+      - PRO: Simpler architecture, shared representations
+      - CON: Both heads always active even when one has no valid actions
+    
+    Approach B: Separate Action-Type Embeddings
+      - Additional embedding layer that marks "addition context" vs "deletion context"
+      - First decide: ADD or DELETE
+      - Then use context-specific embeddings to score edges
+      - PRO: More explicit separation, might learn better
+      - CON: More complex, requires two-stage decoding
+    
+  → RECOMMENDATION: Start with Approach A (unified). The masking will naturally
+    guide the model, and we can add context embeddings later if needed.
+
+
+2. TERMINATION CONDITION: ✓ DECIDED
+------------------------
+DECISION: Multi-layered termination strategy
+  - Self-termination action (DONE) available
+  - Fixed hard limit at 2N steps with large penalty
+  - Small penalty of 0.2% of average problem distance for each deletion used
+  
+IMPLEMENTATION:
+  - Action space includes DONE token
+  - Track deletion count: num_deletions
+  - Step counter: current_step
+  - Termination conditions:
+    * Agent selects DONE → episode ends
+    * current_step >= 2*N → force termination with penalty
+  
+  - Reward components:
+    * deletion_penalty = -0.002 * avg_edge_distance * num_deletions
+    * hard_limit_penalty = -10000 if current_step >= 2*N
+    * final_tour_reward = -tour_length if valid, -10000 if invalid
+  
+CLARIFICATION NEEDED:
+  - Should the 2N limit penalty be applied at the moment we hit 2N, or only
+    if the tour is invalid at that point? (I assume only if invalid?)
+
+
+3. NETWORK ARCHITECTURE: ✓ DECIDED
+-----------------------------------------------
+DECISION: Multi-Head Architecture with 3 heads
+  - Head 1: Add Edge Decoder
+  - Head 2: Delete Edge Decoder  
+  - Head 3: Done Action Decoder
+
+ARCHITECTURE DETAILS:
+  - Encoder: 
+    * 6-layer transformer encoder
+    * Processes node embeddings with current state
+    
+  - Head 1 (Add Edge):
+    * Scores all possible edges (i,j) where i < j
+    * Masks: existing edges, edges where either node has degree 2
+    * Output: logits for ~N²/2 possible additions
+    
+  - Head 2 (Delete Edge):
+    * Scores only currently selected edges
+    * Masks: non-existent edges
+    * Output: logits for up to N deletions (in practice, fewer)
+    
+  - Head 3 (Done):
+    * Single scalar logit
+    * Represents probability of terminating
+    * Can be masked if tour is invalid (see Q10c)
+    
+  - Final Action Selection:
+    * Concatenate all unmasked logits from 3 heads
+    * Apply softmax over combined action space
+    * Sample or argmax to select action
+
+
+4a. STATE REPRESENTATION: ✓ DECIDED
+-----------------------
+DECISION: Use comprehensive state including previous 3 actions
+
+State Components:
+  1. Node positions: (x, y) coordinates
+  2. Current degree: for each node (0, 1, or 2)
+  3. Selected edges: binary adjacency matrix or edge list
+  4. Step counter: current_step
+  5. Deletion counter: num_deletions
+  6. Previous 3 actions: (action_type, node_i, node_j) × 3
+  7. Relative edge positions (see 4b below)
+
+Encoding the Previous Actions:
+  - Create action history embedding:
+    * For each of last 3 actions, embed: (action_type, node_i, node_j)
+    * action_type: {ADD=0, DELETE=1, DONE=2}
+    * Concatenate or sum these embeddings
+    * Add to global context or node features
+  
+  - Implementation options:
+    Option 1: Add to global context vector
+    Option 2: Add to each node's features (broadcast)
+    Option 3: Use temporal attention over action history
+    
+  → RECOMMENDATION: Option 2 (broadcast to nodes) for simplicity
+
+
+4b. ENCODING OPTIONS: ✓ DECIDED
+--------------------------------
+DECISION: Node-centric encoding with edge direction/distance in polar coordinates
+
+Node Feature Vector (per node i):
+  1. x_i: X coordinate
+  2. y_i: Y coordinate  
+  3. degree_i: Current degree (0, 1, or 2)
+  4. theta_1_i: Polar angle to first connected neighbor (or 0 if none)
+  5. d_1_i: Distance to first connected neighbor (or 0 if none)
+  6. theta_2_i: Polar angle to second connected neighbor (or 0 if none)
+  7. d_2_i: Distance to second connected neighbor (or 0 if none)
+  8. step_normalized: current_step / (2*N)
+  9. num_deletions_normalized: num_deletions / N
+  10-18. Previous action embeddings (broadcast)
+
+Total: ~18-20 features per node
+
+IMPLEMENTATION DETAILS:
+  - When degree < 2, unfilled connection slots use zeros
+  - Polar coordinates computed relative to node's position
+  - theta in range [0, 2π], d in normalized units
+  - Order of connections (1 vs 2) can be arbitrary but consistent
+    (e.g., always sort by angle, or by order added)
+
+QUESTION FOR YOU:
+  - For polar coordinates, should theta be relative to:
+    A) Absolute coordinate system (east = 0°, north = 90°)?
+    B) Relative to some problem-specific reference (e.g., depot)?
+    C) Relative to node's position in sorted order?
+    → I recommend A (absolute) for consistency
+
+  - Should we also include absolute distances to both neighbors, or is
+    normalized sufficient?
+
+  - How should we handle the ordering of theta_1/d_1 vs theta_2/d_2?
+    * Sort by theta (always clockwise)?
+    * Sort by distance (closer neighbor first)?
+    * Order of addition (first added = slot 1)?
+    → I recommend sort by theta for consistency
+
+
+5. REWARD STRUCTURE: ✓ DECIDED
+-------------------
+DECISION: Sparse reward only at end, with multi-start greedy (POMO)
+
+Reward Calculation:
+  - During episode: r_t = 0 for all t < T (no intermediate rewards)
+  
+  - At termination (t = T):
+    If tour is valid:
+      R = -tour_length - deletion_penalty
+      deletion_penalty = 0.002 * avg_edge_distance * num_deletions
+      
+    If tour is invalid:
+      R = -10000 (large penalty)
+    
+    If hit 2N step limit:
+      R = R + (-5000) additional penalty for inefficiency
+  
+  - POMO strategy:
+    * Start K parallel trajectories with different initial edges
+    * Each trajectory builds independently
+    * Baseline = mean reward of K trajectories
+    * Select best trajectory as final solution
+
+CLARIFICATION:
+  - The deletion_penalty is small (0.2% of avg distance per deletion)
+  - avg_edge_distance = mean of all N*(N-1)/2 pairwise distances
+  - This encourages efficient solutions but doesn't prohibit deletions
+
+
+6. ACTION MASKING: ✓ DECIDED (partial)
+---------------------------
+DECISION: Mask unavailable additions and deletions
+
+Masking Rules:
+
+For ADD actions:
+  - Mask if edge (i,j) already selected
+  - Mask if node i has degree 2
+  - Mask if node j has degree 2
+  - Mask if i == j (self-loop)
+
+For DELETE actions:
+  - Mask if edge (i,j) not currently selected
+  - Additional constraint: see Q8 thoughts (mask deletion of starting edge)
+
+For DONE action:
+  - See Q10c below
+
+IMPLEMENTATION CHALLENGE:
+  - Node-centric embedding makes it harder to directly compute edge-level masks
+  - Need to track degree per node and selected edges separately
+  - Then combine into edge-level masks for the decoders
+
+PROPOSED SOLUTION:
+  - Maintain adjacency matrix A[i,j] internally in environment
+  - Compute degree[i] = sum(A[i,:]) for each node
+  - For Add Head: 
+    * Create mask tensor M_add[i,j] = 1 if (not A[i,j]) and (degree[i] < 2) 
+                                          and (degree[j] < 2) and (i != j)
+    * Apply M_add to logits before softmax
+  - For Delete Head:
+    * Create mask tensor M_del[i,j] = A[i,j] (only selected edges)
+    * Plus additional constraints (see Q8)
+  
+  - Convert node-centric features to edge features via concatenation:
+    * edge_feat[i,j] = concat(node_feat[i], node_feat[j], distance[i,j])
+
+
+7. SCALABILITY: ✓ DECIDED
+-----------------------------------
+DECISION: Use node-centric approach to maintain scalability
+
+Scalability Strategy:
+  - Node-centric embeddings keep memory O(N) rather than O(N²)
+  - Edge features computed on-the-fly during decoding
+  - Only selected edges tracked explicitly (up to N edges)
+  - Efficient attention mechanisms:
+    * Use sparse attention if N > 100
+    * Or linear attention approximations
+    
+  - For very large N (e.g., 500+), consider:
+    * Hierarchical approach: cluster nodes, solve within clusters
+    * Action pruning: only score top-K edges by distance
+    * But for now, target N ≤ 100
+
+IMPLEMENTATION:
+  - Use efficient edge embedding computation:
+    * Don't materialize full N×N edge tensor
+    * Compute edge scores in batches or on-the-fly
+    * Cache node embeddings, recompute edge logits each step
+
+
+8. POMO MULTI-START STRATEGY: ✓ DECIDED
+---------------------------------
+DECISION: Standard POMO multi-start greedy, choosing a starting edge
+
+POMO Implementation:
+  - K parallel trajectories (K = 8 or K = N/4, configurable)
+  - Each trajectory starts with a different initial edge pre-selected
+  
+  - Initial edge selection:
+    Option A: Choose K shortest edges (might not be diverse)
+    Option B: Sample K edges uniformly
+    Option C: Grid-based: select edges from different regions
+    Option D: Diversity sampling: greedily select K edges that maximize 
+              pairwise distance between edge midpoints
+    
+    → RECOMMENDATION: Option D for maximum diversity
+
+  - After initialization:
+    * Each trajectory proceeds independently with same policy
+    * Shares gradients during training
+    * At inference, return best trajectory
+
+IMPORTANT CONSTRAINT (Q8 thoughts):
+  - "During training, mask the deletion of the starting node"
+  
+  INTERPRETATION: Mask deletion of the starting EDGE (not node)
+    - If trajectory initialized with edge (s_i, s_j), then:
+    - DELETE(s_i, s_j) is always masked for this trajectory
+    - This ensures trajectory maintains variation
+    - Prevents collapse to same solution across all K trajectories
+    
+  IMPLEMENTATION:
+    - Track starting_edge_mask[i,j] = 1 if (i,j) is starting edge
+    - In Delete Head mask: M_del[i,j] = A[i,j] AND (not starting_edge_mask[i,j])
+
+
+9. CURRICULUM & TRAINING: ✓ NOTED
+---------------------------
+(No adjustments needed - information noted)
+
+Training Strategy:
+  - Curriculum learning: Start N=20, progress to N=50, N=100
+  - Batch size: 64 problem instances
+  - POMO augmentation: K=8 trajectories per instance
+  - Effective batch size: 64 * 8 = 512 trajectories
+  
+  - Optimizer: Adam
+  - Learning rate: 1e-4 with cosine annealing
+  - Gradient clipping: max_norm = 1.0
+  
+  - Training duration:
+    * N=20: 100k steps
+    * N=50: 200k steps  
+    * N=100: 300k steps (if needed)
+
+
+10a. INITIAL DELETION BIAS: ✓ DECIDED
+--------------------------------------
+QUESTION: How to make additions more likely than deletions at training start?
+
+PROPOSED SOLUTION: Logit bias for DONE and DELETE actions
+  - Add a learned or fixed bias to Delete Head logits
+  - bias_delete = -5.0 initially (makes deletions very unlikely)
+  - Decay bias over training: bias_delete = -5.0 * (1 - progress)
+    where progress ∈ [0, 1] is fraction of training completed
+  
+  - At training start: DELETE actions suppressed
+  - As training progresses: DELETE becomes more available
+  - By end of training: No bias (model chooses freely)
+
+ALTERNATIVE: Scheduled action masking
+  - For first 20% of training, completely mask DELETE actions
+  - Then gradually unmask over next 30% of training
+  - Final 50% of training: no masking
+  
+  → RECOMMENDATION: Use logit bias (smoother, more flexible)
+
+IMPLEMENTATION:
+  - Add delete_bias parameter to model
+  - Schedule: delete_bias = -5.0 * max(0, 1 - epoch/warmup_epochs)
+  - Apply bias before softmax: logits_delete += delete_bias
+
+
+10b. TRAJECTORY LENGTH CONTROL: ✓ DECIDED
+------------------------------------------
+QUESTION: How to prevent excessively long trajectories?
+
+DECISION: Hard limit handles this
+  - 2N step limit enforced
+  - Large penalty (-5000) if limit reached
+  - Small deletion penalty (0.2% avg distance) naturally discourages
+    excessive add-delete cycles
+  
+  - Model should learn:
+    * Build tour efficiently (minimize deletions)
+    * Terminate before hitting 2N limit
+    * Use deletions sparingly but strategically
+
+
+10c. DONE ACTION MASKING: ✓ DECIDED
+------------------------------------
+QUESTION: Can we mask DONE until a valid tour exists?
+
+DECISION: Yes, mask DONE until valid tour exists
+
+IMPLEMENTATION:
+  - Check validity at each step:
+    * valid_tour = (all nodes have degree 2) AND (graph is connected)
+  
+  - Connectivity check:
+    * Use BFS/DFS from any node
+    * If all N nodes reachable → connected
+    * Efficient: O(N) check
+  
+  - Mask DONE:
+    * If not valid_tour: mask_done = False (DONE not allowed)
+    * If valid_tour: mask_done = True (DONE allowed)
+  
+  - This guarantees that if agent selects DONE, tour is valid
+  
+EDGE CASE:
+  - What if agent never creates valid tour before 2N steps?
+  - Forced termination at 2N → large penalty → agent learns to avoid this
+
+
+================================================================================
+UPDATED PROPOSED ARCHITECTURE
+================================================================================
+
+Environment: CustomTSPEnv
+---------------------------
+STATE:
+  - Node positions: (N, 2) - (x, y) coordinates
+  - Node degrees: (N,) - count ∈ {0, 1, 2}
+  - Adjacency matrix: (N, N) - binary, selected edges
+  - Edge list: list of (i, j, theta_i, d_i, theta_j, d_j) for selected edges
+  - Step counter: current_step ∈ [0, 2N]
+  - Deletion counter: num_deletions
+  - Action history: last 3 actions [(type, i, j), ...]
+  - Starting edge: (s_i, s_j) for POMO trajectory
+
+NODE FEATURES (per node i):
+  [x_i, y_i, degree_i, theta_1, d_1, theta_2, d_2, 
+   step_norm, del_norm, action_history_emb]
+  Total: ~18-20 features
+
+ACTION SPACE:
+  - ADD(i, j): Add edge between nodes i and j (i < j)
+  - DELETE(i, j): Remove edge between nodes i and j
+  - DONE: Terminate episode
+
+DYNAMICS:
+  - ADD(i, j):
+    * Set A[i,j] = A[j,i] = 1
+    * Update degree[i] += 1, degree[j] += 1
+    * Update node features (theta, d for affected nodes)
+    * Add to action history
+    * current_step += 1
+  
+  - DELETE(i, j):
+    * Set A[i,j] = A[j,i] = 0
+    * Update degree[i] -= 1, degree[j] -= 1
+    * Update node features
+    * num_deletions += 1
+    * Add to action history
+    * current_step += 1
+  
+  - DONE:
+    * Terminate episode
+    * Calculate final reward
+
+ACTION MASKING:
+  - ADD(i,j): allowed iff (not A[i,j]) and (degree[i] < 2) and (degree[j] < 2) and (i ≠ j)
+  - DELETE(i,j): allowed iff A[i,j] and ((i,j) ≠ starting_edge)
+  - DONE: allowed iff valid_tour (all degree=2, connected)
+
+REWARD:
+  - All steps t < T: r_t = 0
+  - Terminal step T:
+    * If valid tour:
+        R = -tour_length - (0.002 * avg_dist * num_deletions)
+    * If invalid tour:
+        R = -10000
+    * If current_step >= 2N:
+        R += -5000 (inefficiency penalty)
+
+TERMINATION:
+  - Agent selects DONE, OR
+  - current_step >= 2N (forced)
+
+RESET:
+  - Clear adjacency matrix
+  - Set all degrees to 0
+  - current_step = 0, num_deletions = 0
+  - For POMO: optionally initialize with starting edge
+
+
+Policy: CustomPOMOPolicy
+--------------------------------------------------------------
+ENCODER:
+  - Input: Node features (N, feat_dim) where feat_dim ≈ 18-20
+  - 6-layer Transformer Encoder
+    * Multi-head self-attention (8 heads)
+    * FFN with expansion factor 4
+    * Layer norm, residual connections
+  - Output: Node embeddings (N, emb_dim) where emb_dim = 128
+
+DECODER (3-head architecture):
+  
+  HEAD 1 - Add Edge Decoder:
+    - Input: Node embeddings (N, 128)
+    - Compute edge embeddings for all pairs (i,j) where i < j:
+      * edge_emb[i,j] = concat(node_emb[i], node_emb[j])
+      * Optional: add distance feature, relative position
+    - Project to scalar: logit_add[i,j] = MLP(edge_emb[i,j])
+    - Apply masking: logit_add[i,j] = -∞ if not allowed
+    - Output: logits for ~N(N-1)/2 possible additions
+  
+  HEAD 2 - Delete Edge Decoder:
+    - Input: Node embeddings (N, 128)
+    - Compute edge embeddings for selected edges only:
+      * For each (i,j) in current edge list:
+        edge_emb[i,j] = concat(node_emb[i], node_emb[j])
+    - Project to scalar: logit_del[i,j] = MLP(edge_emb[i,j])
+    - Apply bias: logit_del[i,j] += delete_bias (scheduled)
+    - Apply masking: logit_del[i,j] = -∞ if not allowed (including starting edge)
+    - Output: logits for up to N deletions
+  
+  HEAD 3 - Done Decoder:
+    - Input: Global context (mean pool of node embeddings)
+    - Project to scalar: logit_done = MLP(global_context)
+    - Apply masking: logit_done = -∞ if tour invalid
+    - Output: single logit for DONE action
+
+FINAL ACTION SELECTION:
+  - Collect all valid logits: 
+    logits = [logit_add[...], logit_del[...], logit_done]
+  - Softmax: probs = softmax(logits)
+  - Sample: action ~ Categorical(probs) (training)
+  - Or argmax: action = argmax(probs) (inference)
+
+DELETE BIAS SCHEDULE:
+  - delete_bias = -5.0 * max(0, 1 - current_epoch / warmup_epochs)
+  - warmup_epochs = 0.3 * total_epochs
+  - Decays linearly from -5.0 to 0.0 over first 30% of training
+
+
+Model: CustomPOMO
+---------------------------------------
+POMO AUGMENTATION:
+  - K parallel trajectories (K=8 default)
+  - Diverse starting edge initialization:
+    * Select K edges that maximize diversity (edge midpoint separation)
+    * Each trajectory gets different starting edge
+    * Starting edge is pre-added and masked from deletion
+  
+TRAINING:
+  - Batch size: 64 problem instances
+  - K=8 trajectories per instance → 512 total trajectories per batch
+  - Algorithm: REINFORCE with baseline
+  - Baseline: mean reward across K trajectories in current batch
+  - Loss: L = -mean((R - baseline) * log_prob)
+  - Optimizer: Adam(lr=1e-4)
+  - LR schedule: Cosine annealing
+  - Gradient clipping: max_norm=1.0
+  - Entropy bonus: 0.01 (encourage exploration)
+
+CURRICULUM:
+  - Phase 1 (epochs 0-100): N=20 nodes
+  - Phase 2 (epochs 100-300): N=50 nodes
+  - Phase 3 (epochs 300+): N=100 nodes (optional)
+
+VALIDATION:
+  - Every 10 epochs
+  - Greedy decoding (argmax)
+  - Compare to:
+    * Concorde optimal (if available)
+    * Nearest neighbor heuristic
+    * Standard POMO baseline
+  - Metrics:
+    * Tour length (optimality gap)
+    * Validity rate (should be 100% with DONE masking)
+    * Average deletions used
+    * Average steps to termination
+
+
+================================================================================
+REMAINING QUESTIONS FOR CLARIFICATION
+================================================================================
+
+Q1: POLAR COORDINATES REFERENCE
+--------------------------------
+For the polar coordinates (theta, d) of connected neighbors:
+  A) Use absolute coordinate system (East=0°, counterclockwise)?
+  B) Use relative to some problem reference point?
+  C) Other?
+
+My recommendation: A (absolute) for consistency and simplicity.
+
+
+Q2: CONNECTION ORDERING
+------------------------
+When a node has 2 connections, how to assign them to (theta_1, d_1) vs (theta_2, d_2)?
+  A) Sort by theta (smaller angle first)?
+  B) Sort by distance (closer neighbor first)?
+  C) Order of addition (first added = slot 1)?
+  D) Other?
+
+My recommendation: A (sort by theta) for deterministic, rotation-aware encoding.
+
+
+Q3: DISTANCE NORMALIZATION
+---------------------------
+For distance features (d_1, d_2):
+  A) Normalize by problem diagonal (max possible distance)?
+  B) Normalize by average edge distance?
+  C) Keep absolute distances?
+  D) Use log-scale distances?
+
+My recommendation: A (normalize by diagonal) for scale invariance.
+
+
+Q4: EDGE EMBEDDING ARCHITECTURE
+--------------------------------
+For computing edge logits, should we:
+  A) Simple concatenation: edge_emb = [node_emb[i], node_emb[j]]?
+  B) Add distance feature: edge_emb = [node_emb[i], node_emb[j], dist[i,j]]?
+  C) Use attention: edge_emb = MHA(query=node_emb[i], key=node_emb[j])?
+  D) Use more complex interaction: edge_emb = MLP([node_emb[i], node_emb[j], 
+                                                    node_emb[i]*node_emb[j], dist])?
+
+My recommendation: Start with B (concat + distance), upgrade to D if needed.
+
+
+Q5: STARTING EDGE DELETION
+---------------------------
+You mentioned masking deletion of "starting node" - I interpreted this as 
+"starting edge". Confirm:
+  - Should we mask deletion of the starting EDGE (i,j)?
+  - Or mask deletion of ANY edge connected to starting NODES i or j?
+
+My interpretation: Mask only the specific starting edge (i,j).
+Rationale: Still allows flexibility while preventing collapse.
+
+
+Q6: HARD LIMIT PENALTY TIMING
+------------------------------
+When 2N step limit is reached:
+  A) Apply -5000 penalty only if tour is invalid at termination?
+  B) Always apply -5000 penalty for reaching limit (even if valid)?
+  C) Other?
+
+My recommendation: A (only if invalid). Reaching 2N with valid tour is okay,
+though the deletion penalty will discourage inefficiency.
+
+
+Q7: CONNECTIVITY CHECK OPTIMIZATION
+------------------------------------
+Checking connectivity every step (for DONE mask) could be expensive.
+  A) Check every step (most accurate)?
+  B) Check only when degree condition satisfied (all degree=2)?
+  C) Use incremental connectivity tracking (union-find structure)?
+
+My recommendation: B (check only when degree condition met). This happens
+rarely, so cost is minimal.
+
+
+Q8: ACTION HISTORY ENCODING
+----------------------------
+For encoding previous 3 actions:
+  A) Embed each action separately, then sum?
+  B) Embed each action separately, then concat?
+  C) Use positional encoding for action sequence?
+  D) Use LSTM/GRU to process action history?
+
+My recommendation: A (embed and sum) for simplicity. Position can be encoded
+via learned position embeddings if needed.
+
+
+Q9: VALIDATION AGAINST BASELINES
+---------------------------------
+Should we implement and compare against:
+  A) Just Concorde optimal (if available)?
+  B) Concorde + standard POMO?
+  C) Concorde + standard POMO + greedy heuristics (NN, furthest insertion)?
+  D) All of above + other learned methods (Attention Model, etc.)?
+
+My recommendation: C for comprehensive evaluation, B for faster iteration.
+
+
+Q10: IMPLEMENTATION PRIORITY
+-----------------------------
+Which should we implement first:
+  A) Full architecture as described (most ambitious)?
+  B) Simplified version with fixed action bias (no scheduling)?
+  C) Two-stage approach (standard POMO + learned improvement)?
+  D) Other?
+
+My recommendation: A (full architecture). We've made good design decisions,
+and the complexity is manageable. Fallback to B if training is unstable.
+
+
+================================================================================
+ARCHITECTURE DIAGRAM (VISUAL SUMMARY)
+================================================================================
+
+INPUT (per problem instance):
+  - Node coordinates: (x_i, y_i) for i=1..N
+
+INITIALIZATION (POMO):
+  - Select K diverse starting edges
+  - Create K parallel trajectories
+  - Each starts with one edge pre-selected
+
+ENVIRONMENT STATE (per trajectory):
+  - Adjacency matrix A[N,N]
+  - Compute node features: [x, y, degree, theta_1, d_1, theta_2, d_2, ...]
+  - Track: step counter, deletion counter, action history
+
+POLICY NETWORK:
+  
+  ┌─────────────────────────────────────────┐
+  │         ENCODER (Transformer)           │
+  │  Input: (N, feat_dim) Node Features     │
+  │  Output: (N, 128) Node Embeddings       │
+  └─────────────────┬───────────────────────┘
+                    │
+        ┌───────────┴───────────┐
+        │                       │
+  ┌─────▼──────┐   ┌────────▼──────┐   ┌────▼─────┐
+  │  ADD HEAD  │   │  DELETE HEAD  │   │ DONE HEAD│
+  │            │   │               │   │          │
+  │ Edge Emb   │   │  Edge Emb     │   │ Global   │
+  │ (all pairs)│   │  (selected)   │   │ Context  │
+  │            │   │               │   │          │
+  │ Mask:      │   │ Mask:         │   │ Mask:    │
+  │ - existing │   │ - unselected  │   │ - invalid│
+  │ - degree=2 │   │ - starting    │   │   tour   │
+  │            │   │               │   │          │
+  │ Logits     │   │ Logits        │   │ Logit    │
+  │ (~N²/2)    │   │ (~N)          │   │ (1)      │
+  └─────┬──────┘   └────────┬──────┘   └────┬─────┘
+        │                   │                │
+        └───────────┬───────┴────────────────┘
+                    │
+              ┌─────▼──────┐
+              │  SOFTMAX   │
+              │   SAMPLE   │
+              └─────┬──────┘
+                    │
+              ┌─────▼──────┐
+              │   ACTION   │
+              │ ADD(i,j)   │
+              │ DELETE(i,j)│
+              │ or DONE    │
+              └────────────┘
+
+ENVIRONMENT UPDATE:
+  - Execute action → update state
+  - Compute reward (if terminal)
+  - Check termination
+
+TRAINING (REINFORCE):
+  - Collect K trajectories
+  - Compute rewards
+  - Baseline = mean(rewards)
+  - Loss = -mean((R - baseline) * log_prob)
+  - Backprop, update weights
+
+
+================================================================================
+IMPLEMENTATION PLAN - UPDATED
+================================================================================
+
+Phase 1: Environment (Week 1)
+------------------------------
+Files:
+  1. custom_tsp_env.py
+     - CustomTSPEnv class
+     - State representation with polar coordinates
+     - Action masking (ADD, DELETE, DONE)
+     - Validity checking (degree + connectivity)
+     - Reward calculation with deletion penalty
+     - POMO initialization with starting edges
+  
+  2. custom_tsp_env_test.py
+     - Unit tests for all functionality
+     - Test polar coordinate computation
+     - Test action masking logic
+     - Test validity checking
+     - Test POMO initialization
+
+Questions to resolve before implementation:
+  - Q1: Polar coordinate reference (recommend absolute)
+  - Q2: Connection ordering (recommend sort by theta)
+  - Q3: Distance normalization (recommend by diagonal)
+
+
+Phase 2: Policy Network (Week 2)
+---------------------------------
+Files:
+  3. custom_pomo_policy.py
+     - CustomPOMOPolicy class
+     - Transformer encoder
+     - Three-head decoder architecture
+     - Edge embedding computation
+     - Action masking integration
+     - Delete bias scheduling
+  
+  4. edge_decoder.py
+     - AddEdgeDecoder module
+     - DeleteEdgeDecoder module
+     - DoneDecoder module
+     - Efficient edge embedding computation
+
+Questions to resolve before implementation:
+  - Q4: Edge embedding architecture (recommend concat + distance)
+  - Q8: Action history encoding (recommend embed + sum)
+
+
+Phase 3: POMO Model (Week 3)
+-----------------------------
+Files:
+  5. custom_pomo_model.py
+     - CustomPOMO class
+     - POMO augmentation with diverse edge initialization
+     - Training loop with REINFORCE
+     - Delete bias scheduling
+     - Curriculum learning support
+  
+  6. custom_pomo_utils.py
+     - Diverse edge selection algorithm
+     - Visualization functions
+     - Metric calculation
+     - Baseline computation
+
+Questions to resolve before implementation:
+  - Q5: Starting edge deletion masking (confirm interpretation)
+  - Q6: Hard limit penalty timing (recommend only if invalid)
+  - Q7: Connectivity check optimization (recommend only when degree=2)
+
+
+Phase 4: Training (Week 4)
+---------------------------
+Files:
+  7. train_custom_pomo.py
+     - Training script with all hyperparameters
+     - Curriculum learning schedule
+     - Callbacks for visualization
+     - Checkpointing
+     - Logging (wandb or tensorboard)
+  
+  8. eval_custom_pomo.py
+     - Evaluation script
+     - Comparison to baselines
+     - Visualization of solutions
+     - Statistical analysis
+
+Questions to resolve before implementation:
+  - Q9: Validation baselines (recommend Concorde + POMO + heuristics)
+  - Q10: Implementation priority (recommend full architecture)
+
+
+Phase 5: Experiments (Week 5+)
+-------------------------------
+  - Hyperparameter tuning
+  - Ablation studies:
+    * Effect of delete bias scheduling
+    * Effect of polar coordinate features
+    * Effect of action history
+    * Number of POMO trajectories (K)
+  - Scaling experiments (N=20, 50, 100, 200)
+  - Comparison to other methods
+
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+Please review and provide answers to:
+  - Q1-Q10 above (clarifications on architecture details)
+
+Then I will:
+  1. Implement Phase 1 (Environment) with your specifications
+  2. Create comprehensive tests
+  3. Validate environment logic with simple policies
+  4. Move to Phase 2 (Policy Network)
+
+This is a solid, well-thought-out design. The main risks are:
+  - Learning difficulty (mitigated by curriculum, delete bias scheduling)
+  - Computational cost (mitigated by node-centric encoding, efficient attention)
+  - Invalid tour generation (mitigated by hard constraints, DONE masking)
+
+I'm confident this approach will work with proper implementation and tuning.
+Ready to start when you provide the remaining clarifications!
+
+================================================================================

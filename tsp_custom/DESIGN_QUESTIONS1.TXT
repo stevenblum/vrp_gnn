@@ -1,0 +1,644 @@
+================================================================================
+CUSTOM POMO WITH GLOBAL EDGE SELECTION AND DELETION - DESIGN PLAN
+================================================================================
+
+PROMT: I want to build a script that uses reinforcement learning to train a custom version of the POMO model to solve the traveling salesman problem (TSP). Typically, POMO builds that TSP cycle autoregressivly, meaning that you start at a node, add an edge that is connected to that node, and then add an edge that is connected to the new node, and continue that process. I want to make two changes to this system. First,I want to give the model the ability to add any edge in the network to the route. I want this because it allows the model to think about the problem globally, to add the edge anywhere that will provide the most benifit, similar to how most greed huristics work. Second, I want the model to be able to delete edges that it has selected, so that hopefully it can identify when it has made a poor decision and correct it. Implementing these changes will require some new structure. First, the way the model proposes actions will need to change. I suggest that the model should output 3 tokens, 1: add/delete, 2: node_1, 3: node_2. If you think the model output should be different, please advise me. Also, the TSP environment will need to be handle this new action format. So, I need think we will need new custom classes for the POMP model and the environment to enable global edge selection and deletions. Please develop a .txt file that summarizes how you would structure these custom changes, proposes solutions to any problems that I am not accounting for, and ask questions where clarification is needed. Think critically, dont be a sycophant. If you identify any challenges, people propose several solutions. Please create everything in the tsp_custom folder. For now, just create the text file that outlines your plan.
+
+RESPONSE AFTER USER READ THIS DOCUMENT: Please read, and understand DESIGN_QUESTIONS1.txt file that is attached in the context. Ok, lets rename that file DESIGN_QUESTIONS1.TXT. Here are my answers. Q 1, I would like hard constraints, that include masking to prevent more than two edges being selected for one nods, AND mask out deletion actions if nodes are not already selected. I am a little unsure about how the masking will work like this; we many need some embeddings for deletion actions and some embedding for additions; or maybe you have a better proposal. Q 2, There should be a self termination action, there should also be a fixed limit at 2N with a large penalty, and there should be a relativly small penalty, 0.2 percent of average problem distance, for each deletion used. Q 3, I would like to go with alternative A, Multi-Head Architecture, with 3 heads. Q 4 a, For the proposed stated, please use everything you have listed and add the previous 3 actions. Q 4 b, Encoding Options, Lets go with the node centric reccomendation, plus can you add 4 spots for the realitve direction and distance of the connections in polar coordinates, so it looks like, theta 1, d 1, theta 2, d 2, if the connections dont exist yet I guss they should be zeros, or maybe there is a better way to represent that. Q 5, Reward should be sparse, only at end, with a similar multi start greedy strategy that POMO already uses. Q 6, I think I addressed this with Q 4 b, mask the unavailibile additions and deletions, however the details of this maybe challenging with teh node centric embedding. Masking might be easier if we chose a edge centric embedding. Q 7, I think scalability wont be an issue if we can use the node centric approach, so lets really try to devise a method to use the node centric approach. Q 8, Yes standard POMO multi start greedy, chosing a starting edge. Q 8 thoughts, To make the POMO multi start strategy effective, during training we should make sure to mask the deletion of the startin node, to make sure that the model can't delete it, this should make sure we get some variation in our output. Q 9, Thanks, this is good info, no adjustments needed. 10 a, At the beginning of training, can we do something to make additions more likely than deletions. As training progresses, I think the small penalty for deletions, 0.2 percent of average problem distance, will make model find a sweet spot in terms using deletions effectivly. 10 b, We will have the hard limit for this. 10 c, Can we mask DONE until a valid tour exists? OK, please take the answer the questions I just gave you, and lets create a DESIGN_QUESTIONS2.txt file. Please update the proposed architechure, and then ask any more question we need the answers to before we start to build the custom classes that we will need.
+
+Date: 2025-11-22
+Purpose: Modify POMO for TSP to support:
+  1. Adding ANY edge in the graph (not just from current position)
+  2. Deleting previously added edges
+  3. Enable global reasoning similar to greedy heuristics
+
+================================================================================
+CRITICAL CHALLENGES & DESIGN DECISIONS NEEDED
+================================================================================
+
+1. TOUR VALIDITY & CONSTRAINT ENFORCEMENT
+------------------------------------------
+Problem: TSP requires a Hamiltonian cycle where:
+  - Every node has degree exactly 2
+  - All nodes form a single connected cycle
+  - With arbitrary edge add/delete, we can easily create invalid states:
+    * Disconnected components
+    * Nodes with degree > 2 or degree < 2
+    * Multiple disjoint subtours
+
+QUESTION 1: How should we handle validity constraints?
+
+Option A: SOFT CONSTRAINTS (recommended for RL flexibility)
+  - Allow invalid intermediate states during construction
+  - Only require validity at episode termination
+  - Give large penalty for invalid final tours
+  - Pros: Maximum flexibility, model can learn to avoid invalid states
+  - Cons: Harder to learn, might get stuck in invalid states
+
+Option B: HARD CONSTRAINTS (easier to learn)
+  - Only allow actions that maintain partial validity:
+    * Never let node degree exceed 2
+    * Track connected components, prevent disconnecting
+  - Pros: Guarantees valid or repairable final state
+  - Cons: Complex masking logic, reduces action space flexibility
+
+Option C: HYBRID (best of both worlds?)
+  - Enforce degree constraints (degree ≤ 2) via masking
+  - Allow disconnected components during construction
+  - Final state must form valid tour or receive large penalty
+  - Pros: Prevents most invalid states while allowing flexibility
+  - Cons: Still complex masking
+
+RECOMMENDATION: Start with Option C (hybrid), then experiment with Option A
+
+
+2. TERMINATION CONDITION
+------------------------
+Problem: Standard POMO ends when all nodes visited. With edge-based 
+construction, when does an episode end?
+
+Option A: FIXED STEP BUDGET
+  - Allow exactly K steps (e.g., K = 2*N for N-node problem)
+  - Model must construct valid tour within budget
+  - Pros: Simple, prevents infinite episodes
+  - Cons: Hard to choose K, inefficient if tour completes early
+
+Option B: SELF-TERMINATION
+  - Add "DONE" action to action space
+  - Model chooses when to stop
+  - Must have valid tour when DONE is selected
+  - Pros: Flexible, efficient
+  - Cons: Model might terminate too early or never terminate
+
+Option C: VALIDITY-BASED TERMINATION
+  - Episode ends when a valid tour is formed
+  - Or when step budget exhausted
+  - Pros: Natural termination condition
+  - Cons: Model might never form valid tour
+
+RECOMMENDATION: Option B (self-termination) with maximum step budget as backup
+  - Add 4th action type: (ADD, DELETE, DONE)
+  - Max steps = 3*N as safety measure
+
+
+3. ACTION REPRESENTATION & NETWORK ARCHITECTURE
+-----------------------------------------------
+Problem: Your proposal uses 3 tokens (add/delete, node_1, node_2).
+This requires 3 autoregressive steps per action, which is inefficient.
+
+QUESTION 2: How should the model output actions?
+
+Your Proposal: 3 Sequential Tokens
+  - Step 1: Output binary (add vs delete)
+  - Step 2: Output node_1 from [1, ..., N]
+  - Step 3: Output node_2 from [1, ..., N]
+  - Total action space: 2 * N * N (includes invalid combinations)
+  - ISSUES:
+    * 3 forward passes per action (slow)
+    * Lots of invalid actions need masking (node_1 == node_2, etc.)
+    * Order matters (is edge (i,j) same as (j,i)? Yes for undirected)
+
+Alternative A: DUAL-HEAD ARCHITECTURE (recommended)
+  - Encoder: Process node coordinates → node embeddings
+  - Decoder Head 1: Score all N*(N-1)/2 possible edge ADDITIONS
+  - Decoder Head 2: Score all currently selected edges for DELETION
+  - Decoder Head 3: Score DONE action
+  - Action = argmax over {all additions, all deletions, done}
+  - BENEFITS:
+    * Single forward pass
+    * Naturally handles undirected edges
+    * Clear separation of add vs delete logic
+    * Easy masking (can't add existing edge, can't delete non-existing)
+  - IMPLEMENTATION:
+    * Use edge attention mechanism (query from edge, attend to nodes)
+    * Or pairwise attention between all node pairs
+
+Alternative B: EDGE-FACTORED SEQUENTIAL
+  - Step 1: Choose operation (ADD, DELETE, DONE)
+  - If ADD: Step 2 chooses edge from all valid additions
+  - If DELETE: Step 2 chooses edge from current edges
+  - BENEFITS:
+    * Only 2 steps per action (vs your 3)
+    * Smaller action space at step 2 (dynamic based on step 1)
+  - DRAWBACKS:
+    * Still 2 forward passes
+    * More complex training
+
+Alternative C: UNIFIED EDGE VOCABULARY
+  - Create vocabulary of all possible edges: e_1, ..., e_{N(N-1)/2}
+  - Add special tokens: DELETE_e_1, ..., DELETE_e_k (for current edges)
+  - Plus DONE token
+  - Single softmax over entire vocabulary
+  - BENEFITS:
+    * Single output, single forward pass
+    * Simple implementation
+  - DRAWBACKS:
+    * Very large vocabulary for big N (e.g., N=50 → 1225 edges)
+    * Dynamic vocabulary for deletes (need to update each step)
+
+RECOMMENDATION: Alternative A (dual-head architecture)
+  - Most efficient and natural for this problem
+  - Scalable to larger instances
+
+
+4. STATE REPRESENTATION
+-----------------------
+Problem: Need to track which edges are currently in the partial solution
+and encode this information for the policy network.
+
+Proposed State Components:
+  a) Node positions: (x, y) coordinates - standard
+  b) Current edge set: Which edges are selected
+  c) Node degrees: How many edges incident to each node
+  d) Step counter: How many steps taken
+  e) Last action: What was the previous action (for temporal context)
+
+Encoding Options:
+
+Option A: ADJACENCY MATRIX EMBEDDING
+  - Maintain binary adjacency matrix A[i,j] ∈ {0,1}
+  - Add to node features via:
+    * Degree feature per node: sum(A[i,:])
+    * Neighbor embedding: aggregate embeddings of adjacent nodes
+  - Pros: Rich representation, easy to track connections
+  - Cons: Memory intensive for large N
+
+Option B: EDGE LIST WITH ATTENTION
+  - Maintain list of selected edges
+  - Use cross-attention between nodes and edge list
+  - Pros: Memory efficient, flexible
+  - Cons: More complex architecture
+
+Option C: NODE-CENTRIC (recommended)
+  - For each node, track:
+    * Position (x, y)
+    * Current degree (0, 1, or 2)
+    * Binary flags for which neighbors are connected (sparse)
+    * Positional encoding
+  - Pros: Scalable, integrates well with attention
+  - Cons: Need careful design for neighbor information
+
+RECOMMENDATION: Option C with adjacency information in attention masking
+  - Node features: (x, y, degree, step_number)
+  - Use masked attention where mask encodes current edges
+  - Track full adjacency matrix internally but don't explicitly embed it all
+
+
+5. REWARD STRUCTURE
+-------------------
+Problem: How to assign rewards when intermediate states may not be valid tours?
+
+Option A: SPARSE REWARD (only at end)
+  - If final state is valid tour: reward = -tour_length
+  - If final state is invalid: reward = large_penalty (e.g., -10000)
+  - Pros: Simple, unambiguous
+  - Cons: Hard to learn, no guidance during episode
+
+Option B: DENSE REWARD (every step)
+  - Each step: reward = change in objective + validity penalty
+  - r_t = -(current_cost - previous_cost) - λ * validity_violation
+  - validity_violation = sum of degree violations + disconnection penalty
+  - Pros: Provides learning signal throughout episode
+  - Cons: Complex to design, might bias towards local optima
+
+Option C: HYBRID (recommended)
+  - Small step penalty: r_t = -0.01 (encourages efficiency)
+  - Validity penalty if constraints violated: r_t -= λ * violations
+  - Final reward if episode ends with valid tour: R_final = -tour_length
+  - Final penalty if invalid: R_final = -max_possible_distance * N
+  - Pros: Balanced, provides guidance without over-constraining
+  - Cons: Hyperparameter tuning needed (λ, step penalty)
+
+RECOMMENDATION: Start with Option C, tune penalties during training
+
+
+6. ACTION MASKING STRATEGY
+---------------------------
+Need to mask invalid actions to speed up learning and prevent errors.
+
+Minimum Masking (always required):
+  - Cannot add edge that already exists
+  - Cannot delete edge that doesn't exist
+  - Cannot add edge (i,i) (self-loop)
+  - Cannot select DONE if tour is invalid (unless we allow failure)
+
+Optional Masking (depends on constraint strategy):
+  - Cannot add edge (i,j) if node i or j already has degree 2
+  - Cannot delete edge if it would create unreachable nodes (?)
+  - Mask based on which nodes are in which connected component (?)
+
+RECOMMENDATION: Implement minimum masking + degree constraint masking
+  - Track current degree of each node
+  - Mask add operations for edges where both nodes have degree 2
+  - This prevents most invalid states while maintaining flexibility
+
+
+7. SCALABILITY & ACTION SPACE SIZE
+-----------------------------------
+Problem: Action space grows as O(N²), much larger than standard POMO's O(N)
+
+For N=50 nodes:
+  - Possible edges: 50*49/2 = 1,225
+  - At each step, might have ~1,225 add actions + up to 50 delete actions
+  - Total: ~1,275 actions per step
+  - Standard POMO: ~50 actions per step (unvisited nodes)
+
+Implications:
+  - Slower inference (must score more actions)
+  - Harder exploration (much larger search space)
+  - May need more training data or longer training
+
+Mitigation Strategies:
+  a) Use efficient attention mechanisms (linear attention, sparse attention)
+  b) Curriculum learning: start with small N, gradually increase
+  c) Warm-start from greedy heuristic solutions
+  d) Use action pruning: only consider top-k edges by distance for additions
+  e) Hierarchical actions: first select region, then select specific edge
+
+RECOMMENDATION: Implement (b) curriculum and (c) warm-start initially
+  - Start training on N=20, then 30, then 50
+  - Initialize first few episodes with nearest-neighbor heuristic
+
+
+8. POMO PARALLELIZATION STRATEGY
+---------------------------------
+Standard POMO: Start multiple trajectories from different starting nodes
+
+For edge-based construction, what should be the parallel trajectories?
+
+Option A: Different Initial Edges
+  - Start each trajectory by adding a different edge
+  - Choose edges that are "diverse" (e.g., different regions of graph)
+  - Continue construction in parallel
+
+Option B: Different Random Seeds
+  - All trajectories start with empty edge set
+  - Use different random seeds for action sampling
+  - Simpler but less structured diversity
+
+Option C: Different Heuristic Initializations
+  - Initialize some with nearest-neighbor edges
+  - Initialize some with random edges  
+  - Initialize some with furthest-insertion edges
+  - Provides diverse starting points
+
+RECOMMENDATION: Option A (different initial edges)
+  - Select K diverse edges (e.g., K=N for N-node problem)
+  - Diversity metric: minimize overlap of endpoint nodes
+  - Each trajectory starts with one of these edges pre-added
+
+
+9. COMPARISON TO EXISTING METHODS
+----------------------------------
+Your approach is novel but consider how it relates to:
+
+a) 2-opt and k-opt local search:
+   - These also add/delete edges (swap edges)
+   - But they start from a valid tour
+   - Your method builds from scratch with add/delete
+
+b) Ant Colony Optimization:
+   - Constructs tours by selecting edges with pheromone guidance
+   - But constructs incrementally from current position
+
+c) Insertion heuristics:
+   - Add nodes to tour at best position
+   - Similar "global" decision making
+
+Your approach is most similar to: Learning-based edge assembly with backtracking
+  - Pro: More flexible than sequential construction
+  - Con: Larger action space, harder to learn
+  - Unique: Learned policy instead of hand-crafted heuristic
+
+
+10. POTENTIAL FAILURE MODES
+----------------------------
+Issues to watch for:
+
+a) Model always chooses DELETE, never builds tour
+   - Mitigation: Require minimum number of edges before allowing delete
+   - Or: Only allow DELETE after at least N edges added
+
+b) Model builds invalid tours and can't escape
+   - Mitigation: Soft constraints + good reward shaping
+   - Or: Allow "reset" action to clear current solution?
+
+c) Model terminates too early (before valid tour)
+   - Mitigation: Mask DONE action until valid tour exists
+   - Or: Large penalty for early termination
+
+d) Model never terminates (keeps adding/deleting)
+   - Mitigation: Hard step limit (e.g., 3*N steps max)
+
+e) Model ignores global structure, makes random decisions
+   - Mitigation: Good state representation + attention mechanism
+   - Pre-training or warm-start from heuristics
+
+
+================================================================================
+PROPOSED ARCHITECTURE SUMMARY
+================================================================================
+
+Environment: CustomTSPEnv
+---------------------------
+- State: 
+  * Node positions (N, 2)
+  * Adjacency matrix (N, N) - binary, tracks selected edges
+  * Node degrees (N,) - count of incident selected edges
+  * Step counter
+  * Valid action mask
+
+- Action Space:
+  * ADD_EDGE(i, j) for all valid i < j
+  * DELETE_EDGE(i, j) for all selected edges
+  * DONE
+
+- Dynamics:
+  * ADD: Set adjacency[i,j] = 1, update degrees
+  * DELETE: Set adjacency[i,j] = 0, update degrees
+  * DONE: End episode
+  * Update action mask after each action
+
+- Reward:
+  * Step penalty: -0.01 per step
+  * Degree violation penalty: -λ₁ * sum(max(0, degree[i] - 2))
+  * Final reward if valid tour: -tour_length
+  * Final penalty if invalid: -1000
+
+- Termination:
+  * DONE action selected, OR
+  * Max steps (3*N) reached
+
+- Reset:
+  * Clear adjacency matrix
+  * Initialize with K diverse edges for POMO (optional)
+
+
+Policy: CustomPOMOPolicy (inherits from AttentionModelPolicy)
+--------------------------------------------------------------
+- Encoder:
+  * Input: Node features (x, y, degree, positional_encoding)
+  * 6-layer transformer encoder
+  * Output: Node embeddings (N, embed_dim)
+
+- Decoder (dual-head):
+  * Head 1 - Add Edge Decoder:
+    - Compute edge embeddings for all pairs (i,j) where i < j
+    - Edge embedding: concat(node_emb[i], node_emb[j], distance[i,j])
+    - Project to logits
+    - Mask existing edges and edges violating degree constraints
+    - Output: logits for all possible additions
+  
+  * Head 2 - Delete Edge Decoder:
+    - Compute edge embeddings for selected edges only
+    - Project to logits
+    - Output: logits for all possible deletions
+  
+  * Head 3 - Done Decoder:
+    - Single logit for DONE action
+    - Can mask if tour is invalid (optional)
+  
+  * Combine all logits, apply softmax, sample action
+
+- Action Masking:
+  * Invalid adds: existing edges, degree-2 nodes, self-loops
+  * Invalid deletes: non-existent edges
+  * Invalid done: if requiring valid tour at termination
+
+
+Model: CustomPOMO (inherits from POMO)
+---------------------------------------
+- Batch size: 64
+- POMO augmentation:
+  * Create K parallel trajectories (K = 8 or K = N)
+  * Each starts with different initial edge (optional)
+  * Or each uses different random seed
+  
+- Training:
+  * Use REINFORCE with baseline
+  * Baseline: Mean reward of parallel trajectories in batch
+  * Optimizer: Adam, lr=1e-4
+  * Gradient clipping
+
+- Validation:
+  * Greedy decoding (argmax)
+  * Compare to Concorde optimal solutions
+  * Track: tour length, validity rate, solve time
+
+
+================================================================================
+IMPLEMENTATION PLAN - PHASED APPROACH
+================================================================================
+
+Phase 1: Core Environment (Week 1)
+-----------------------------------
+Files to create:
+  1. custom_tsp_env.py - CustomTSPEnv class
+     - State representation
+     - Action space definition  
+     - Step function (add/delete/done)
+     - Reward calculation
+     - Action masking logic
+     - Validity checking
+  
+  2. custom_tsp_env_test.py - Unit tests
+     - Test edge addition/deletion
+     - Test validity checking
+     - Test reward calculation
+     - Test action masking
+     - Test termination conditions
+
+Phase 2: Policy Network (Week 2)
+---------------------------------
+Files to create:
+  3. custom_pomo_policy.py - CustomPOMOPolicy class
+     - Edge embedding computation
+     - Dual-head decoder architecture
+     - Action masking integration
+     - Forward pass implementation
+  
+  4. edge_decoder.py - EdgeDecoder module
+     - Add-edge attention mechanism
+     - Delete-edge attention mechanism
+     - Edge feature computation
+
+Phase 3: POMO Model (Week 3)
+-----------------------------
+Files to create:
+  5. custom_pomo_model.py - CustomPOMO class
+     - POMO augmentation for edge-based construction
+     - Training loop modifications
+     - Trajectory initialization
+  
+  6. custom_pomo_utils.py - Helper functions
+     - Edge selection for POMO initialization
+     - Visualization functions
+     - Metrics calculation
+
+Phase 4: Training & Evaluation (Week 4)
+----------------------------------------
+Files to create:
+  7. train_custom_pomo.py - Training script
+     - Hyperparameter configuration
+     - Training loop
+     - Checkpointing
+     - Callbacks for visualization
+  
+  8. eval_custom_pomo.py - Evaluation script
+     - Load trained model
+     - Test on various instance sizes
+     - Compare to baselines (Concorde, standard POMO, heuristics)
+     - Generate visualizations
+
+Phase 5: Experiments & Tuning (Week 5+)
+----------------------------------------
+  9. Hyperparameter tuning
+  10. Curriculum learning experiments
+  11. Ablation studies
+  12. Scaling experiments
+
+
+================================================================================
+CRITICAL QUESTIONS FOR YOU
+================================================================================
+
+1. VALIDITY CONSTRAINTS:
+   Should we allow invalid intermediate states during construction?
+   Or enforce hard constraints (e.g., degree ≤ 2) via masking?
+   → My recommendation: Hybrid (enforce degree ≤ 2, allow disconnection)
+
+2. TERMINATION:
+   Should the model learn when to stop (DONE action)?
+   Or use fixed step budget?
+   → My recommendation: Self-termination with max step backup
+
+3. INITIAL STATE:
+   Should POMO trajectories start with different initial edges?
+   Or all start empty with different random seeds?
+   → My recommendation: Different initial edges for diversity
+
+4. DELETE RESTRICTIONS:
+   Should we allow DELETE from step 1?
+   Or only after building partial tour (e.g., after N/2 edges added)?
+   → My recommendation: Allow from start but provide minimal tour to delete from
+
+5. OBJECTIVE:
+   Pure tour length minimization?
+   Or multi-objective (tour length + minimize steps)?
+   → My recommendation: Pure tour length, but with step penalty to encourage efficiency
+
+6. TRAINING PROGRESSION:
+   Start small (N=20) and curriculum to N=50?
+   Or train directly on N=50?
+   → My recommendation: Curriculum learning
+
+7. WARM START:
+   Initialize with heuristic solutions for first few epochs?
+   Or pure random exploration?
+   → My recommendation: Optional warm-start for first 10% of training
+
+
+================================================================================
+ALTERNATIVE APPROACHES TO CONSIDER
+================================================================================
+
+Alternative 1: TWO-STAGE APPROACH (Lower Risk)
+-----------------------------------------------
+Stage 1: Use standard POMO to build initial tour
+Stage 2: Use custom add/delete policy to improve tour (like learned 2-opt)
+
+Pros:
+  - Easier to learn (always start from valid tour)
+  - Can leverage existing POMO implementation
+  - More interpretable (improvement vs construction)
+  
+Cons:
+  - Not true "global" construction from scratch
+  - Stage 1 biases the search space
+  - Less novel
+
+This might be a good fallback if full construction proves too difficult.
+
+
+Alternative 2: EDGE-POINTER NETWORK (Different Architecture)
+-------------------------------------------------------------
+Instead of attention over all edges:
+  - Use pointer network to sequentially select edges
+  - At each step, point to an edge to add
+  - Use separate "delete pointer" to remove edges
+  - More similar to standard seq2seq
+
+Pros:
+  - Well-established architecture
+  - Easier to implement
+  
+Cons:
+  - Still large action space
+  - Less natural for global reasoning
+
+
+Alternative 3: GRAPH NEURAL NETWORK + EDGE CLASSIFICATION
+----------------------------------------------------------
+Different paradigm:
+  - Use GNN to process node positions
+  - Classify each potential edge: include/exclude
+  - Train with supervised learning on optimal solutions
+  - Then fine-tune with RL
+
+Pros:
+  - Non-autoregressive (parallel edge decisions)
+  - Very fast inference
+  
+Cons:
+  - Might not produce valid tours
+  - Less exploration during training
+  - Need supervised data
+
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+After you provide feedback on the questions above, I will:
+
+1. Implement the CustomTSPEnv class with your preferred design choices
+2. Create comprehensive unit tests
+3. Implement the CustomPOMOPolicy with dual-head architecture
+4. Set up training script with callbacks for monitoring
+5. Run initial experiments on small instances (N=20)
+6. Iterate based on results
+
+Please review this plan and provide guidance on:
+  - Which options you prefer for the critical decisions
+  - Any concerns or modifications to the proposed architecture
+  - Whether to implement the main approach or one of the alternatives first
+  - Timeline and priorities
+
+
+================================================================================
+FINAL THOUGHTS
+================================================================================
+
+Your idea is ambitious and interesting. The main challenges are:
+
+1. **Learning Difficulty**: Much larger action space than standard POMO
+   → Mitigation: Good reward shaping, curriculum learning, warm-start
+
+2. **Validity Enforcement**: Need to handle invalid intermediate states gracefully
+   → Mitigation: Hybrid constraints (hard degree limits, soft connectivity)
+
+3. **Exploration**: Hard to find good solutions in large space
+   → Mitigation: POMO diversity, heuristic initialization, action pruning
+
+4. **Computational Cost**: Scoring O(N²) actions vs O(N) in standard POMO
+   → Mitigation: Efficient implementation, batched operations
+
+This is research-level work. Success is not guaranteed, but the approach is
+sound if we make good design choices. I recommend starting with the hybrid
+constraint approach and self-termination, then experimenting with relaxations
+if the model learns successfully.
+
+The two-stage approach (Alternative 1) would be a safer starting point if you
+want faster initial results, but is less novel.
+
+I'm ready to implement once you provide guidance on the critical decisions above.

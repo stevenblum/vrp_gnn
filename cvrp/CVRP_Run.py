@@ -8,16 +8,16 @@ from datetime import datetime
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from types import MethodType
 
 from rl4co.envs.routing import CVRPEnv, CVRPGenerator
-from rl4co.models import AttentionModelPolicy, POMO
+from rl4co.models import AttentionModelPolicy, AttentionModel, POMO
 from rl4co.utils import RL4COTrainer
 from rl4co.data.utils import load_npz_to_tensordict  # fast RL4CO loader :contentReference[oaicite:1]{index=1}
 from rl4co.data.dataset import TensorDictDataset
-from rl4co.data.dataset import TensorDictDataset
-from rl4co.envs.common.distribution_utils import Mix_Multi_Distributions
+from rl4co.envs.common.distribution_utils import Mix_Multi_Distributions, Mix_Distribution
 from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import ModelCheckpoint, RichModelSummary
 
 from classes.CVRPValBaselineCallback import CVRPValBaselineCallback
 from classes.CVRPGraphPlotCallback import CVRPGraphPlotCallback
@@ -27,95 +27,26 @@ from classes.CVRPSamplerCluster import SamplerCluster
 from classes.CVRPSamplerMixed import SamplerMixed
 from classes.CVRPTrainGraphPlotCallback import CVRPTrainGraphPlotCallback
 from classes.CVRPLibHelpers import normalize_coord, vrp_to_td, batchify_td, load_val_instance
+from torch.utils.data import Dataset
 
-def main():
-    # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='CVRP Training with AttentionModel')
-    parser.add_argument('--embedding_dim', type=int, default=256,
-                        help='Embedding dimension for the attention model (default: 256)')
-    parser.add_argument('--num_encoder_layers', type=int, default=6,
-                        help='Number of encoder layers (default: 6)')
-    parser.add_argument('--num_attn_heads', type=int, default=16,
-                        help='Number of attention heads (default: 16)')
-    parser.add_argument('--learning_rate', type=float, default=1e-4,
-                        help='Learning rate (default: 1e-4)')
-    parser.add_argument('--weight_decay', type=float, default=1e-6,
-                        help='Weight decay for optimizer (default: 1e-6)')
-    parser.add_argument('--num_loc_train', type=int, default=100,
-                        help='Number of customer locations for training (default: 100)')
-    parser.add_argument('--min_demand', type=int, default=3,
-                        help='Minimum customer demand (default: 3)')
-    parser.add_argument('--max_demand', type=int, default=30,
-                        help='Maximum customer demand (default: 30)')
-    parser.add_argument('--vehicle_capacity', type=float, default=100.0,
-                        help='Override vehicle capacity; higher allows more customers per tour (default: 100.0)')
-    parser.add_argument('--test_seed', type=int, default=1234,
-                        help='Seed for generating fixed test set (default: 1234)')
-    parser.add_argument('--batch_size', type=int, default=64,
-                        help='Training batch size (default: 64)')
-    parser.add_argument('--train_data_size', type=int, default=2_000_000,
-                        help='Number of training instances per epoch (default: 2,000,000)')
-    parser.add_argument('--test_data_size', type=int, default=100,
-                        help='Number of random test instances (default: 100)')
-    parser.add_argument('--pomo_num_starts', type=int, default=None,
-                        help='Number of POMO starts for validation (default: same as num_loc_train)')
-    parser.add_argument('--max_epochs', type=int, default=300,
-                        help='Maximum number of training epochs (default: 300)')
-    parser.add_argument('--normalization', type=str, default='batch',
-                        choices=['batch', 'layer', 'none'],
-                        help='Normalization type for attention model (default: batch)')
-    parser.add_argument('--limit_train_batches', type=float, default=None,
-                        help='Limit fraction of training batches per epoch (default: None, use all)')
-    parser.add_argument('--log_base_dir', type=str, default='lightning_logs',
-                        help='Base directory for logging (default: lightning_logs)')
-    parser.add_argument('--train_decode_type', type=str, default='sampling',
-                        choices=['sampling', 'greedy'],
-                        help='Decode type for training (default: sampling)')
-    parser.add_argument('--train_temperature', type=float, default=1.0,
-                        help='Sampling temperature for training (higher = more exploration) (default: 1.0)')
-    parser.add_argument('--val_decode_type', type=str, default='sampling',
-                        choices=['sampling', 'greedy'],
-                        help='Decode type for validation (POMO will prepend multistart_) (default: sampling)')
-    parser.add_argument('--val_num_samples', type=int, default=10_000,
-                        help='Number of samples during validation (default: 10,000). Applies when validation uses sampling.')
-    parser.add_argument('--val_temperature', type=float, default=1.0,
-                        help='Sampling temperature during validation (default: 1.0)')
-    parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
-                        help='Run validation every N epochs (default: 1). Set higher to reduce validation overhead.')
-    parser.add_argument('--checkpoint_after_epoch', type=int, default=0,
-                        help='Only save checkpoints after this epoch number (default: 0, save from start)')
-    parser.add_argument('--lr_reduce_factor', type=float, default=0.7,
-                        help='ReduceLROnPlateau: factor to reduce LR when plateauing (default: 0.7)')
-    parser.add_argument('--lr_reduce_patience', type=int, default=3,
-                        help='ReduceLROnPlateau: epochs with no improvement before reducing LR (default: 3)')
-    parser.add_argument('--lr_reduce_threshold', type=float, default=1e-3,
-                        help='ReduceLROnPlateau: improvement threshold to ignore (default: 1e-3)')
-    parser.add_argument('--precision', type=str, default='16-mixed',
-                        help='Precision for training (default: 16-mixed to save memory)')
-    args = parser.parse_args()
+class ListTensorDictDataset(Dataset):
+    """Simple Dataset that returns one TensorDict per index."""
+    def __init__(self, tds):
+        self.tds = tds
 
-    # !!! NAME MODEL !!!!
-    exp_name = f"emb{args.embedding_dim}_enc{args.num_encoder_layers}_attn{args.num_attn_heads}"
+    def __len__(self):
+        return len(self.tds)
 
-    #loc_sampler = Mix_Multi_Distributions()
+    def __getitem__(self, idx):
+        return self.tds[idx]
 
-    generator = CVRPGenerator(
-        num_loc=args.num_loc_train,
-    )
-    env = CVRPEnv(generator)
+def collate_single(batch):
+    # batch is a list of length = batch_size
+    # with batch_size=1, batch = [td]; we just unwrap
+    assert len(batch) == 1
+    return batch[0]
 
-    policy = AttentionModelPolicy(
-        env_name=env.name, 
-        embed_dim=args.embedding_dim,
-        num_encoder_layers=args.num_encoder_layers,
-        num_heads=args.num_attn_heads,
-        normalization=args.normalization, # 'batch', 'layer', None
-        train_decode_type=args.train_decode_type,
-        val_decode_type=args.val_decode_type,
-        test_decode_type=args.val_decode_type,  # match validation decoding
-        temperature=args.train_temperature,
-        use_graph_context=False, # For POMO, helps prevent overfitting to training graph size
-        )
+def create_val_loader():
 
     # ---------------- VALIDATION (X instances you pick) ----------------
     # Point this to wherever you saved the converted files.
@@ -163,30 +94,166 @@ def main():
         else:
             raise FileNotFoundError(f"Couldn't find {stem} as .npz or .vrp")
 
+    from torch.utils.data import Dataset
+
+    # val_tds: list[TensorDict], one per CVRPLib instance
     val_tds = [load_val_instance(p) for p in val_paths]
     print("Test (CVRPLib) set:", val_paths)
-    # One DataLoader per test instance (batch_size=1 to handle variable sizes)
-    val_loaders = [
-        DataLoader(
-            TensorDictDataset(td),
-            batch_size=1,
-            shuffle=False,
-            num_workers=4,
-            collate_fn=TensorDictDataset.collate_fn,
-        )
-        for td in val_tds
-    ]
 
+    val_dataset = ListTensorDictDataset(val_tds)
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=1,
+        shuffle=False,
+        persistent_workers=True,
+        num_workers=4,
+        collate_fn=collate_single,
+    )
+
+    return val_loader, VAL_INSTANCES
+
+def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='CVRP Training with AttentionModel')
+    parser.add_argument('--embedding_dim', type=int, default=256,
+                        help='Embedding dimension for the attention model (default: 256)')
+    parser.add_argument('--num_encoder_layers', type=int, default=6,
+                        help='Number of encoder layers (default: 6)')
+    parser.add_argument('--num_attn_heads', type=int, default=16,
+                        help='Number of attention heads (default: 16)')
+    parser.add_argument('--learning_rate', type=float, default=1e-4,
+                        help='Learning rate (default: 1e-4)')
+    parser.add_argument('--weight_decay', type=float, default=1e-6,
+                        help='Weight decay for optimizer (default: 1e-6)')
+    parser.add_argument('--num_loc_train', type=int, default=100,
+                        help='Number of customer locations for training (default: 100)')
+    parser.add_argument('--min_demand', type=int, default=3,
+                        help='Minimum customer demand (default: 3)')
+    parser.add_argument('--max_demand', type=int, default=30,
+                        help='Maximum customer demand (default: 30)')
+    parser.add_argument('--vehicle_capacity', type=float, default=100.0,
+                        help='Override vehicle capacity; higher allows more customers per tour (default: 100.0)')
+    parser.add_argument('--test_seed', type=int, default=1234,
+                        help='Seed for generating fixed test set (default: 1234)')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Training batch size (default: 64)')
+    parser.add_argument('--train_data_size', type=int, default=2_000_000,
+                        help='Number of training instances per epoch (default: 2,000,000)')
+    parser.add_argument('--test_data_size', type=int, default=100,
+                        help='Number of random test instances (default: 100)')
+    parser.add_argument('--train_num_starts', type=int, default=None,
+                        help='Number of POMO starts for validation (default: same as num_loc_train)')
+    parser.add_argument('--max_epochs', type=int, default=300,
+                        help='Maximum number of training epochs (default: 300)')
+    parser.add_argument('--normalization', type=str, default='batch',
+                        choices=['batch', 'layer', 'none'],
+                        help='Normalization type for attention model (default: batch)')
+    parser.add_argument('--limit_train_batches', type=float, default=None,
+                        help='Limit fraction of training batches per epoch (default: None, use all)')
+    parser.add_argument('--log_base_dir', type=str, default='lightning_logs',
+                        help='Base directory for logging (default: lightning_logs)')
+    parser.add_argument('--train_decode_type', type=str, default='sampling',
+                        choices=['sampling', 'greedy', 'multistart_sampling', 'multistart_greedy'],
+                        help='Decode type for training (default: sampling; multistart_* will be normalized to sampling/greedy)')
+    parser.add_argument('--train_temperature', type=float, default=1.0,
+                        help='Sampling temperature for training (higher = more exploration) (default: 1.0)')
+    parser.add_argument('--val_decode_type', type=str, default='sampling',
+                        choices=['sampling', 'greedy', 'multistart_sampling', 'multistart_greedy','multistart_beam_search'],
+                        help='Decode type for validation (POMO will prepend multistart_) (default: sampling; multistart_* allowed)')
+    parser.add_argument('--val_num_samples', type=int, default=10_000,
+                        help='Number of samples during validation (default: 10,000). Applies when validation uses sampling.')
+    parser.add_argument('--val_temperature', type=float, default=1.0,
+                        help='Sampling temperature during validation (default: 1.0)')
+    parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
+                        help='Run validation every N epochs (default: 1). Set higher to reduce validation overhead.')
+    parser.add_argument('--checkpoint_after_epoch', type=int, default=0,
+                        help='Only save checkpoints after this epoch number (default: 0, save from start)')
+    parser.add_argument('--lr_reduce_factor', type=float, default=0.7,
+                        help='ReduceLROnPlateau: factor to reduce LR when plateauing (default: 0.7)')
+    parser.add_argument('--lr_reduce_patience', type=int, default=3,
+                        help='ReduceLROnPlateau: epochs with no improvement before reducing LR (default: 3)')
+    parser.add_argument('--lr_reduce_threshold', type=float, default=1e-3,
+                        help='ReduceLROnPlateau: improvement threshold to ignore (default: 1e-3)')
+    parser.add_argument('--precision', type=str, default='16-mixed',
+                        help='Precision for training (default: 16-mixed to save memory)')
+    args = parser.parse_args()
+
+    # !!! Experiment Name, Pytorch Lightning Will Then Give the Version A Name !!!!
+    exp_name = f"emb{args.embedding_dim}_enc{args.num_encoder_layers}_attn{args.num_attn_heads}"
+
+    val_loader, VAL_INSTANCES = create_val_loader()
+
+    loc_sampler = Mix_Multi_Distributions()
+    loc_sampler = Mix_Distribution(n_cluster=5)
+
+    generator = CVRPGenerator(
+        num_loc=args.num_loc_train,
+        loc_sampler=loc_sampler,
+    )
+    env = CVRPEnv(generator)
+    '''
+    policy = AttentionModelPolicy(
+        env_name=env.name, 
+        embed_dim=args.embedding_dim,
+        num_encoder_layers=args.num_encoder_layers,
+        num_heads=args.num_attn_heads,
+        normalization=args.normalization, # 'batch', 'layer', None
+        train_decode_type=args.train_decode_type,
+        val_decode_type=args.val_decode_type,
+        val_num_samples=args.val_num_samples,
+        temperature=args.train_temperature,
+        use_graph_context=False, # For POMO, helps prevent overfitting to training graph size
+        )
+    
+    
     model = POMO(
         env,
         policy=policy,
         batch_size=args.batch_size,
         optimizer_kwargs={"lr": args.learning_rate, "weight_decay": args.weight_decay},
         train_data_size=args.train_data_size,
-        val_data_size=1000,  # random validation instances
-        test_data_size=0,    # overridden by custom test loaders
-        num_starts=args.pomo_num_starts,         # Number of POMO starts during train/validation
+        num_starts=args.train_num_starts,         # Number of POMO starts during train/validation
+        policy_kwargs={
+            "val_decode_type": args.val_decode_type,
+            "val_num_samples": args.val_num_samples,
+            "val_temperature": args.val_temperature,
+        }
     )
+    
+
+    model = AttentionModel(
+        env,
+        policy=policy,
+        baseline="rollout",
+        batch_size=args.batch_size,
+        optimizer_kwargs={"lr": args.learning_rate, "weight_decay": args.weight_decay},
+        train_data_size=args.train_data_size,
+        policy_kwargs={
+            "val_decode_type": args.val_decode_type,
+            "val_num_samples": args.val_num_samples,
+            "val_temperature": args.val_temperature,
+        }
+    )
+    '''
+    policy = AttentionModelPolicy(
+        env_name=env.name, 
+        )
+    model = POMO(
+        env,
+        policy=policy,
+        batch_size=args.batch_size,
+        optimizer_kwargs={"lr": args.learning_rate, "weight_decay": args.weight_decay},
+        train_data_size=args.train_data_size,
+        )
+
+    print("CHECKING POLICY SETUP:")
+    print(f"  policy.train_decode_type: {model.policy.train_decode_type}")
+    print(f"  policy.temperature: {model.policy.temperature}")
+    print(f"  policy.val_decode_type: {model.policy.val_decode_type}")
+    #print(f"  policy.val_num_samples: {model.policy.val_num_samples}")
+    #print(f"  policy.val_temperature: {model.policy.val_temperature}")
+    print(f"  policy.test_decode_type: {model.policy.test_decode_type}")
 
     # Create logger first so we can pass it to callbacks
     run_id = datetime.now().strftime("%y%m%d_%H%M")
@@ -196,7 +263,7 @@ def main():
         version=run_id,
     )
     print(f"[INFO] Logging to: {logger.log_dir}")
-
+    '''
     # Prepare all hyperparameters including argparse arguments
     def _sanitize_hparams(hparams: dict):
         """Convert any non-primitive values to strings so TensorBoard HParams accepts them."""
@@ -216,7 +283,7 @@ def main():
         "weight_decay": args.weight_decay,
         
         # POMO Configuration
-        "pomo_num_starts": args.pomo_num_starts,
+        "train_num_starts": args.train_num_starts,
         "val_num_samples": args.val_num_samples,
         "val_temperature": args.val_temperature,
         "lr_reduce_factor": args.lr_reduce_factor,
@@ -225,7 +292,7 @@ def main():
         
         # Decode Types
         "train_decode_type": args.train_decode_type,
-        "pomo_num_starts": args.pomo_num_starts,
+        "train_num_starts": args.train_num_starts,
         "train_temperature": args.train_temperature,
         
         # Training Configuration
@@ -273,6 +340,7 @@ def main():
     with open(config_path, 'w') as f:
         yaml.dump(hparams, f, default_flow_style=False, sort_keys=False)
     print(f"Configuration saved to: {config_path}")
+    '''
 
     # Now create callbacks with logger
     plot_metric_cb = CVRPMetricPlotCallback()
@@ -288,24 +356,27 @@ def main():
         use_model_solutions=True,  # Use validation solutions if available
     )
     '''
-
-
-    ckpt_cb = ModelCheckpoint(
+    
+    checkpoint_cb = ModelCheckpoint(
         monitor="val/reward",
         mode="max",
         filename="best-{epoch:02d}-{val/reward:.4f}",
-        save_top_k=1,
+        save_top_k=5,
         save_last=True,
         verbose=True,
-        auto_insert_metric_name=False,
         dirpath=os.path.join(logger.log_dir, "checkpoints"),
     )
 
-    callback_list = [ckpt_cb, 
-                     #baseline_cb, 
+    rich_model_cb = RichModelSummary(max_depth=3)
+    
+    callback_list = [checkpoint_cb, 
+                     rich_model_cb,
+                     #baseline_cb,
                      train_plot_graph_cb,
                      #val_plot_graph_cb, 
-                     plot_metric_cb]
+                     #plot_metric_cb,
+                     #avg_reward_cb,
+                     ]
     
     trainer = RL4COTrainer(
         max_epochs=args.max_epochs,
@@ -316,26 +387,12 @@ def main():
         log_every_n_steps=50,
         limit_train_batches=args.limit_train_batches,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
-        enable_model_summary=True,  # Enable model summary
-        num_sanity_val_steps=2,      # Skip sanity validation to start training faster
-        enable_progress_bar=True,
     )
 
-    trainer.fit(model,
-            val_dataloaders=val_loaders)
+    print(VAL_INSTANCES)
+    model.dataloader_names = VAL_INSTANCES
 
-    # ---------------- TEST ON CVRPLIB INSTANCES ----------------
-    print(f"\nRunning test on CVRPLib test set ({len(test_loaders)} instances)...")
-    test_results = trainer.test(model, ckpt_path="best", verbose=True, dataloaders=test_loaders)
-    print(f"Test results on CVRPLib test set: {test_results}")
-    if logger is not None and hasattr(logger, "experiment") and test_results:
-        try:
-            step = trainer.global_step if hasattr(trainer, "global_step") else 0
-            for k, v in test_results[0].items():
-                logger.experiment.add_scalar(f"test/{k}", v, step)
-            print("[INFO] Test metrics logged to TensorBoard.")
-        except Exception as e:
-            print(f"[WARN] Failed to log test metrics: {e}")
+    trainer.fit(model, val_dataloaders=val_loader)
 
 if __name__ == "__main__":
     import multiprocessing as mp

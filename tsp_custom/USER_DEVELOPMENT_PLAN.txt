@@ -1,0 +1,102 @@
+THIS DOCUMENT IS THE USERS PLAN FOR PROJECT DEVELOPMENT. 
+ONLY THE USER SHOULD EDIT THIS DOCUMENT.
+AI MAY SUGGEST IMPROVEMETNS OR EDITS TO THIS DOCUMENT IN THE CHAT.
+AI SHOULD GIVE CONCIDE AND CRITICAL FEEDBACK AT ALL STAGES OF THE PROJECT.
+AI, DO NOT BE A SYCOPHANT, TELL ME YOUR HONEST OPINTION.
+AI SHOULD TRY TO FIND SOLUTIONS TO ANY AND ALL PROBEMS IDENTIFIED.
+AI SHOULD NOT MAKE MAJOR CHANGES TO CODE OR DOCUMENTS WITHOUT ASKING THE USER.
+
+# Project Goal:
+Develop a deep leaning model that can solve traveling salesman
+problems (TSP) with sequential actions by selecting or removing edges.
+The proposed model maybe more efficent than SOTA methods because it will
+allow the model to consider the problem globally when selecting edges,
+and allow the model to delete edges it has selected if it thinks it made
+a mistake.
+
+# Resources:
+This project should be build on the python rl4co library.
+Use as many rl4co native classes and functions as posible.
+You must access the rl4co repository frequently to understand
+the library's capabilities, classes, functions, and ecosystem.
+Rely on the offical documents heavily. 
+
+#Expected Exection: 
+First, architectures for the actions, envrionments, and 
+model output will need to be agreed apon. Then custom implmentations of 
+rl4co classes Model and Evironment need to be developed to work with the 
+custom action format. Other helper classes and functions maybe needed
+to facilititate this. Then unit tests, operational tests, and finally 
+a fully operational version of the code should be developed. In addition, 
+classes and functions that enable visulaization, logging, and metric collection 
+should be implements as early as practicle so that the user can understand 
+and debug any issues. 
+
+# Logistics Principles:
+Variable names should be descriptive
+Code should be written for readability and maintainability
+Blocks of code should be commented
+Inline comments are encouraged
+Avoid inserting comment lines above every line of code
+A log file should be heavily used, and referenced during debugging
+Unit test should be implement with external scripts that create and run classes and functions
+Within script error checking should be kept at a minimum to keep code short and compact  
+
+# Development Steps:
+
+* IMPORTANT, Current Status, Step 9.
+
+1. Refine the plan for the architecture through several rounds of
+brainstorming, proposals, questions, and answers. Dialoge saved in the
+DESIGN_QUESTIONS[#].txt files.
+
+2. Develop a design architecture should be finalized in DESIGN_ARCHITECTURE.txt.
+This file should be updated as design changes are implemented.
+
+3. Develop a a minimual viable custom rl4co Environment class should be built
+that allows the action described above. It should be as similar as possible to 
+the rl4co TSP environment. The envrionement should log if a node is connected to
+3 edges or if DONE action is passed without a valide tour. Please log all setps 
+that maybe important for debugging.
+
+4. Develop unit test for the environment, focus on sending the envrionemnt
+specific actions and making sure its states update appropriatly. Check many 
+different actions that move the environment to different states. 
+After each action you should check that the state has updated appropriatly.
+Make sure to check the warnings we programmed into the environment, 
+specifically the 3 edges connected to one node warnings and invalide 
+DONE action warnings.
+
+5. Develop visualizations of the environment and actions, 
+that show how the graph edges are selected and deleted 
+during the unit test. At each action, This will assist in debugging.
+A .gif format where each frame represnts an action seems efficent. 
+The action, along with the state of the graph should be displayed.
+Show delections with thin dotted red lines even after the edges are removed,
+this may take storing some additional details about the history of actions.
+The visulization will also be used during training, validation, and inference runs.
+
+6. Develop a minimum viable custom rl4co Model class that includes all of the 
+correct embedding, encoding, decoding, masking, policy, action output, and
+multi start execution. The model should be as similar to the rl4co 
+POMO model as possible.
+
+7. Develop unit tests for the model and policy, focused on passing the 
+model and policy a state from an environmnet (where we already know the state) 
+and making sure the model or policy output valid actions. Print visualizations
+of the test where appropriate.
+
+8. Develop a train.py script that incorporates everything needed to 
+train the custom model with the custom environment.
+
+9. Develop callbacks that creates the visualization during validation and 
+a plot for validation and training costs (distances) during the training 
+cycle. These .png plots and .gif  should be saved into the folder that 
+pytorch lighting already creates as part of the trianing process. All file
+names should start with the epotch##, so that outputs from the same epoch
+appear together.
+
+
+
+Items that Need to be Addressed in the Future
+- Masking to prevent nodes order > 3, and done without complete tour
