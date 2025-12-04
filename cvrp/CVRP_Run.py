@@ -30,6 +30,7 @@ from classes.CVRPSamplerMixed import SamplerMixed
 from classes.CVRPTrainGraphPlotCallback import CVRPTrainGraphPlotCallback
 from classes.CVRPLibHelpers import normalize_coord, vrp_to_td, batchify_td, load_val_instance
 from torch.utils.data import Dataset
+from classes.HParamsLoggerCallback import HParamsLoggerCallback
 
 class ListTensorDictDataset(Dataset):
     """Simple Dataset that returns one TensorDict per index."""
@@ -187,6 +188,8 @@ def main():
                         help='ReduceLROnPlateau: improvement threshold to ignore (default: 1e-3)')
     parser.add_argument('--precision', type=str, default='16-mixed',
                         help='Precision for training (default: 16-mixed to save memory)')
+    parser.add_argument('--device', type=str, default=None,
+                        help='Device selection for this run: e.g. "cpu", "mps", "cuda", "cuda:0", or a numeric GPU index (0).')
     args = parser.parse_args()
 
     # Resolve train seed (int or "random")
@@ -202,6 +205,41 @@ def main():
         np.random.seed(args.train_seed)
     except Exception:
         pass
+
+    # Determine accelerator early in main so it's set before Trainer is constructed.
+    # Priority: --device CLI arg > ACCELERATOR env var > auto-detect via torch
+    acc = None
+    # 1) CLI device argument
+    if args.device:
+        dev = str(args.device)
+        # numeric index -> treat as CUDA index
+        if dev.isdigit():
+            os.environ["CUDA_VISIBLE_DEVICES"] = dev
+            acc = "cuda"
+            # expose that we selected a single device via env
+        elif dev.startswith("cuda:"):
+            idx = dev.split(":", 1)[1]
+            os.environ["CUDA_VISIBLE_DEVICES"] = idx
+            acc = "cuda"
+        elif dev in ("cuda", "cpu", "mps"):
+            acc = dev
+        else:
+            # fallback: treat as accelerator name
+            acc = dev
+    # 2) environment override
+    if acc is None:
+        acc = os.environ.get("ACCELERATOR")
+
+    # 3) auto-detect
+    if not acc:
+        if torch.cuda.is_available():
+            acc = "cuda"
+        elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            acc = "mps"
+        else:
+            acc = "cpu"
+
+    print(f"Using accelerator: {acc}")
 
     # !!! Experiment Name, Pytorch Lightning Will Then Give the Version A Name !!!!
     exp_name = args.run_name if args.run_name else f"emb{args.embedding_dim}_enc{args.num_encoder_layers}_attn{args.num_attn_heads}"
@@ -367,6 +405,8 @@ def main():
         # Test Instances (CVRPLib)
         "num_test_instances": len(VAL_INSTANCES),
         "test_instances": VAL_INSTANCES,
+        # Device used for this run (CLI arg or detected)
+        "device": (args.device if args.device is not None else acc),
     }
     
     # Save YAML file with all hyperparameters
@@ -385,6 +425,7 @@ def main():
             "exp_vehicle_capacity": args.vehicle_capacity,
             "exp_num_loc_train": args.num_loc_train,
             "exp_train_set_clusters": args.train_set_clusters,
+        "device": (args.device if args.device is not None else acc),
         }
     
     print("\n\n\nHYPERPARAMS TO LOG:", hparams_log,"\n\n")
@@ -422,21 +463,36 @@ def main():
                      #rich_model_cb,
                      #baseline_cb,
                      train_plot_graph_cb,
+                     HParamsLoggerCallback(),
                      #val_plot_graph_cb, 
                      #plot_metric_cb,
                      #avg_reward_cb,
                      ]
     
-    trainer = RL4COTrainer(
+    trainer_kwargs = dict(
         max_epochs=args.max_epochs,
         callbacks=callback_list,
-        accelerator="cuda",
-        precision=args.precision,
+        accelerator=acc,
+        # If we're not on CUDA, disable mixed-precision/autocast defaults that target CUDA
+        precision=(args.precision if acc == "cuda" else (
+            "32" if ("16" in str(args.precision).lower() or "bf16" in str(args.precision).lower()) else args.precision
+        )),
         logger=logger,
         log_every_n_steps=50,
         limit_train_batches=args.limit_train_batches,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
     )
+
+    # Notify if precision was adjusted for the chosen accelerator
+    chosen_prec = trainer_kwargs.get("precision")
+    if chosen_prec != args.precision:
+        print(f"Adjusted precision from {args.precision} to {chosen_prec} because accelerator={acc}")
+
+    # If using a hardware accelerator, request a single device
+    if acc != "cpu":
+        trainer_kwargs["devices"] = 1
+
+    trainer = RL4COTrainer(**trainer_kwargs)
 
     print(VAL_INSTANCES)
     model.dataloader_names = VAL_INSTANCES
