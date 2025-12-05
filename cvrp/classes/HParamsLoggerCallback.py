@@ -33,22 +33,34 @@ class HParamsLoggerCallback(Callback):
         except Exception:
             return None
 
+    def _sanitize_params(self, params):
+        primals = (int, float, str, bool, type(None))
+        return {k: (v if isinstance(v, primals) else str(v)) for k, v in params.items()}
+
     def _log_metrics(self, trainer, metrics: dict):
         logger = trainer.logger
-        step = getattr(trainer, "global_step", None)
+        params = {}
+        if hasattr(trainer, "lightning_module") and hasattr(trainer.lightning_module, "hparams"):
+            try:
+                params = dict(trainer.lightning_module.hparams)
+            except Exception:
+                params = {}
+        params = self._sanitize_params(params)
         # Prefer hparams metrics if available
         if logger is not None and hasattr(logger, "log_hyperparams"):
             try:
-                logger.log_hyperparams({}, metrics=metrics)
+                logger.log_hyperparams(params, metrics=metrics)
+                print(f"HParamsLoggerCallback: logged hparams+metrics via log_hyperparams at step {getattr(trainer,'global_step',None)}")
                 return
-            except Exception:
-                # Fall through to log_metrics
-                pass
+            except Exception as e:
+                print(f"HParamsLoggerCallback: log_hyperparams failed ({e}), falling back to log_metrics")
 
         # Fallback
         if logger is not None and hasattr(logger, "log_metrics"):
             try:
+                step = getattr(trainer, "global_step", None)
                 logger.log_metrics(metrics, step=step)
+                print(f"HParamsLoggerCallback: logged metrics via log_metrics at step {step}")
             except Exception:
                 # Last resort: print
                 print("HParamsLoggerCallback: failed to log metrics to logger; metrics=", metrics)
