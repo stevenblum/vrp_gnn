@@ -3,3 +3,5 @@
 *.ckpt
 *.png
 *.gif
+*.log
+*.pyc

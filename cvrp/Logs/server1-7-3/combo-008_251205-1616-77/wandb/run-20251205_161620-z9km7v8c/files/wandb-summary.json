@@ -1,0 +1,1 @@
+{"_timestamp":1.764969680524438e+09,"_wandb":{"runtime":312},"_runtime":312,"_step":30,"train/reward":{"max":-9.121443748474121},"train/loss":-2.2670483589172363,"epoch":0,"trainer/global_step":1549}

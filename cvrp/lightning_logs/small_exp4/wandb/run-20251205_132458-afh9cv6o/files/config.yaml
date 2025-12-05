@@ -1,0 +1,280 @@
+_wandb:
+    value:
+        cli_version: 0.23.1
+        e:
+            k7pnn8jjnesundxhq2md8nv71i99k2mh:
+                args:
+                    - --max_epochs
+                    - "100"
+                    - --learning_rate
+                    - "0.0001"
+                    - --batch_size
+                    - "64"
+                    - --train_data_size
+                    - "100000"
+                    - --log_base_dir
+                    - lightning_logs/small_exp4
+                    - --normalization
+                    - instance
+                    - --train_seed
+                    - random
+                    - --wanb_project_name
+                    - cvrp-exp-server1
+                    - --optimizer
+                    - Adam
+                    - --embedding_dim
+                    - "512"
+                    - --num_encoder_layers
+                    - "7"
+                    - --num_attn_heads
+                    - "8"
+                    - --vehicle_capacity
+                    - "120"
+                    - --num_train_locs
+                    - "100"
+                    - --train_set_clusters
+                    - "8"
+                    - --weight_decay
+                    - "1e-05"
+                    - --run_name
+                    - combo_013
+                    - --device
+                    - cuda:5
+                codePath: cvrp/CVRP_Run.py
+                codePathLocal: CVRP_Run.py
+                cpu_count: 64
+                cpu_count_logical: 128
+                cudaVersion: "13.0"
+                disk:
+                    /:
+                        total: "1888558305280"
+                        used: "339354288128"
+                email: steven.blum@uri.edu
+                executable: /home/sblum/Projects/vrp_gnn/.venv/bin/python
+                git:
+                    commit: 75e5ca59bca1005165f896a6c09c18e8839baa3b
+                    remote: https://github.com/stevenblum/vrp_gnn.git
+                gpu: NVIDIA L40S
+                gpu_count: 8
+                gpu_nvidia:
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-df761a05-5c5a-95c7-3fd7-6f0e03e3a19a
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-f1b89118-e304-2799-6ed2-7bd474221f76
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-96e9e0b7-76cd-0cce-c817-7685d75c324f
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-c8e0fef6-b6ee-037e-bf5a-cf653c2b794c
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-28910484-3d25-5a28-e72e-7ca5a926e675
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-f2e13f7f-9f28-3108-5395-2d75bcbf2bcc
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-23a239bf-06b4-497c-b239-fb2fa97bbfc5
+                    - architecture: Ada
+                      cudaCores: 18176
+                      memoryTotal: "48305799168"
+                      name: NVIDIA L40S
+                      uuid: GPU-393f4f36-2661-5f4f-b3fa-7a2f61fdb69f
+                host: lambda-scalar
+                memory:
+                    total: "811280412672"
+                os: Linux-5.15.0-160-generic-x86_64-with-glibc2.35
+                program: /home/sblum/Projects/vrp_gnn/cvrp/CVRP_Run.py
+                python: CPython 3.10.12
+                root: lightning_logs/small_exp4
+                startedAt: "2025-12-05T18:24:58.188583Z"
+                writerId: k7pnn8jjnesundxhq2md8nv71i99k2mh
+        m:
+            - "1": trainer/global_step
+              "6":
+                - 3
+              "7": []
+            - "1": train/reward
+              "6":
+                - 3
+              "7":
+                - 2
+            - "1": val/reward
+              "6":
+                - 3
+              "7":
+                - 2
+            - "1": val/10k-reward
+              "6":
+                - 3
+              "7":
+                - 2
+            - "2": '*'
+              "5": 1
+              "6":
+                - 1
+              "7": []
+        python_version: 3.10.12
+        t:
+            "1":
+                - 1
+                - 50
+                - 77
+                - 105
+                - 106
+            "2":
+                - 1
+                - 50
+                - 77
+                - 105
+                - 106
+            "3":
+                - 7
+                - 13
+                - 63
+                - 66
+            "4": 3.10.12
+            "5": 0.23.1
+            "12": 0.23.1
+            "13": linux-x86_64
+augment_fn:
+    value: dihedral8
+baseline:
+    value: shared
+batch_size:
+    value: 64
+check_val_every_n_epoch:
+    value: 1
+checkpoint_after_epoch:
+    value: 0
+data_dir:
+    value: data/
+dataloader_num_workers:
+    value: 0
+device:
+    value: cuda:5
+embedding_dim:
+    value: 512
+exp_embedding_dim:
+    value: 512
+exp_num_attn_heads:
+    value: 8
+exp_num_encoder_layers:
+    value: 7
+exp_num_loc_train:
+    value: 100
+exp_train_set_clusters:
+    value: 8
+exp_vehicle_capacity:
+    value: 120
+exp_weight_decay:
+    value: 1e-05
+feats:
+    value: null
+first_aug_identity:
+    value: true
+generate_default_data:
+    value: false
+learning_rate:
+    value: 0.0001
+limit_train_batches:
+    value: null
+log_base_dir:
+    value: lightning_logs/small_exp4
+log_on_step:
+    value: true
+lr_reduce_factor:
+    value: 0.7
+lr_reduce_patience:
+    value: 3
+lr_reduce_threshold:
+    value: 0.001
+lr_scheduler:
+    value: null
+lr_scheduler_interval:
+    value: epoch
+lr_scheduler_kwargs:
+    value:
+        gamma: 0.1
+        milestones:
+            - 80
+            - 95
+lr_scheduler_monitor:
+    value: val/reward
+max_demand:
+    value: 30
+max_epochs:
+    value: 100
+min_demand:
+    value: 3
+normalization:
+    value: instance
+num_attn_heads:
+    value: 8
+num_augment:
+    value: 8
+num_encoder_layers:
+    value: 7
+num_loc_train:
+    value: 100
+num_starts:
+    value: null
+optimizer:
+    value: Adam
+optimizer_kwargs:
+    value:
+        lr: 0.0001
+        weight_decay: 1e-05
+reward_scale:
+    value: null
+shuffle_train_dataloader:
+    value: false
+test_batch_size:
+    value: null
+test_data_size:
+    value: 10000
+test_seed:
+    value: 1234
+train_data_size:
+    value: 100000
+train_decode_type:
+    value: sampling
+train_num_starts:
+    value: null
+train_seed:
+    value: 482918429
+train_set_clusters:
+    value: 8
+train_temperature:
+    value: 1
+val_batch_size:
+    value: 1
+val_data_size:
+    value: 10000
+val_num_samples:
+    value: 10000
+val_temperature:
+    value: 1
+vehicle_capacity:
+    value: 120
+wanb_project_name:
+    value: cvrp-exp-server1
+weight_decay:
+    value: 1e-05

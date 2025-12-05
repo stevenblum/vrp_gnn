@@ -1,0 +1,1 @@
+{"val/reward":{"max":-51.554595947265625},"train/reward":{"max":-11.999709129333496},"val/10k-reward":{"max":0},"_timestamp":1.7649637530755956e+09,"_step":160,"train/loss":-0.5511458516120911,"_wandb":{"runtime":4647},"epoch":4,"_runtime":4647,"trainer/global_step":7814}

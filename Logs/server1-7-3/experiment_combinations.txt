@@ -1,0 +1,16 @@
+embedding_dim: 256, num_encoder_layers: 5, num_attn_heads: 8, train_vehicle_capacity: 120, train_num_locs: 100, train_set_clusters: 4, weight_decay: 1e-06
+embedding_dim: 256, num_encoder_layers: 5, num_attn_heads: 8, train_vehicle_capacity: 150, train_num_locs: 100, train_set_clusters: 8, weight_decay: 1e-05
+embedding_dim: 256, num_encoder_layers: 5, num_attn_heads: 16, train_vehicle_capacity: 120, train_num_locs: 130, train_set_clusters: 8, weight_decay: 1e-05
+embedding_dim: 256, num_encoder_layers: 5, num_attn_heads: 16, train_vehicle_capacity: 150, train_num_locs: 130, train_set_clusters: 4, weight_decay: 1e-06
+embedding_dim: 256, num_encoder_layers: 7, num_attn_heads: 8, train_vehicle_capacity: 120, train_num_locs: 130, train_set_clusters: 8, weight_decay: 1e-06
+embedding_dim: 256, num_encoder_layers: 7, num_attn_heads: 8, train_vehicle_capacity: 150, train_num_locs: 130, train_set_clusters: 4, weight_decay: 1e-05
+embedding_dim: 256, num_encoder_layers: 7, num_attn_heads: 16, train_vehicle_capacity: 120, train_num_locs: 100, train_set_clusters: 4, weight_decay: 1e-05
+embedding_dim: 256, num_encoder_layers: 7, num_attn_heads: 16, train_vehicle_capacity: 150, train_num_locs: 100, train_set_clusters: 8, weight_decay: 1e-06
+embedding_dim: 512, num_encoder_layers: 5, num_attn_heads: 8, train_vehicle_capacity: 120, train_num_locs: 130, train_set_clusters: 4, weight_decay: 1e-05
+embedding_dim: 512, num_encoder_layers: 5, num_attn_heads: 8, train_vehicle_capacity: 150, train_num_locs: 130, train_set_clusters: 8, weight_decay: 1e-06
+embedding_dim: 512, num_encoder_layers: 5, num_attn_heads: 16, train_vehicle_capacity: 120, train_num_locs: 100, train_set_clusters: 8, weight_decay: 1e-06
+embedding_dim: 512, num_encoder_layers: 5, num_attn_heads: 16, train_vehicle_capacity: 150, train_num_locs: 100, train_set_clusters: 4, weight_decay: 1e-05
+embedding_dim: 512, num_encoder_layers: 7, num_attn_heads: 8, train_vehicle_capacity: 120, train_num_locs: 100, train_set_clusters: 8, weight_decay: 1e-05
+embedding_dim: 512, num_encoder_layers: 7, num_attn_heads: 8, train_vehicle_capacity: 150, train_num_locs: 100, train_set_clusters: 4, weight_decay: 1e-06
+embedding_dim: 512, num_encoder_layers: 7, num_attn_heads: 16, train_vehicle_capacity: 120, train_num_locs: 130, train_set_clusters: 4, weight_decay: 1e-06
+embedding_dim: 512, num_encoder_layers: 7, num_attn_heads: 16, train_vehicle_capacity: 150, train_num_locs: 130, train_set_clusters: 8, weight_decay: 1e-05

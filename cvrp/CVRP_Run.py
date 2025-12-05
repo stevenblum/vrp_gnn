@@ -6,6 +6,7 @@ import argparse
 import yaml
 from datetime import datetime
 import random
+import math
 from tensordict import TensorDict
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -20,13 +21,14 @@ from rl4co.data.dataset import TensorDictDataset
 from rl4co.envs.common.distribution_utils import Mix_Multi_Distributions, Mix_Distribution
 from lightning.pytorch.loggers import WandbLogger
 from lightning.pytorch.callbacks import ModelCheckpoint, RichModelSummary, EarlyStopping
+from torch.optim.lr_scheduler import OneCycleLR
 
-from classes.CVRPValBaselineCallback import CVRPValBaselineCallback
-from classes.CVRPGraphPlotCallback import CVRPGraphPlotCallback
-from classes.CVRPLibGraphPlotCallback import CVRPLibGraphPlotCallback
+#from classes.CVRPValBaselineCallback import CVRPValBaselineCallback
+#from classes.CVRPGraphPlotCallback import CVRPGraphPlotCallback
+#from classes.CVRPLibGraphPlotCallback import CVRPLibGraphPlotCallback
 from classes.CVRPMetricPlotCallback import CVRPMetricPlotCallback
-from classes.CVRPSamplerCluster import SamplerCluster
-from classes.CVRPSamplerMixed import SamplerMixed
+#from classes.CVRPSamplerCluster import SamplerCluster
+#from classes.CVRPSamplerMixed import SamplerMixed
 from classes.CVRPTrainGraphPlotCallback import CVRPTrainGraphPlotCallback
 from classes.CVRPLibValSamplerCallback import CVRPLibValSamplerCallback
 from classes.CVRPLibHelpers import normalize_coord, vrp_to_td, batchify_td, load_val_instance
@@ -124,139 +126,97 @@ def create_val_loader():
 
 def main():
     # Parse command-line arguments
-    parser = argparse.ArgumentParser(description='CVRP Training with AttentionModel')
+    parser = argparse.ArgumentParser(description='CVRP Training Arguments')
+
+    # ADMINISTRATIVE ###########################
+    parser.add_argument('--exp_name', type=str, default=None,
+                        help='Experiment name, used as wandb project name and local log path')
+    parser.add_argument('--combo_name', type=str, default=None,
+                        help='Defines which factor combination from the experiment is running')
+    parser.add_argument('--run_id', type=str, default=None,
+                        help='Datetime string to identify each run, last two are millis to make them unique.')
+    parser.add_argument('--run_name', type=str, default=None,
+                        help='[combo_name]_[run_id]')
+    parser.add_argument('--log_dir', type=str, default=None,
+                        help='./Logs/[exp_name]')
+    parser.add_argument('--device_name', type=str, default=None,
+                            help='Device selection for this run: e.g. "cpu", "mps", "cuda", "cuda:0").')
+    parser.add_argument('--device_num', type=int, default=None,
+                            help='Device number that is passed to the Pytorch Lightning trainer.')
+    parser.add_argument('--precision', type=str, default='16-mixed',
+                        help='Precision for training (default: 16-mixed to save memory)')
+
+    # GENERAL EXECUTION ##########################
+    parser.add_argument('--max_epochs', type=int, default=300,
+                        help='Maximum number of training epochs (default: 300)')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Training batch size (default: 64)')
+    parser.add_argument('--limit_train_batches', type=float, default=None,
+                        help='Limit fraction of training batches per epoch (default: None, use all)')
+    parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
+                        help='Run validation every N epochs (default: 1). Set higher to reduce validation overhead.')
+    parser.add_argument('--checkpoint_after_epoch', type=int, default=0,
+                        help='Only save checkpoints after this epoch number (default: 0, save from start)')
+
+    # MODEL AND POLICY ARCHITECTURE #################
     parser.add_argument('--embedding_dim', type=int, default=256,
                         help='Embedding dimension for the attention model (default: 256)')
     parser.add_argument('--num_encoder_layers', type=int, default=6,
                         help='Number of encoder layers (default: 6)')
     parser.add_argument('--num_attn_heads', type=int, default=16,
                         help='Number of attention heads (default: 16)')
+    parser.add_argument('--normalization', type=str, default='batch',
+                        choices=['batch', 'layer', 'instance', 'none'],
+                        help='Normalization type for attention model (default: batch)')
+    
+    # OPTIMIZER #######################
     parser.add_argument('--learning_rate', type=float, default=1e-4,
                         help='Learning rate (default: 1e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-6,
                         help='Weight decay for optimizer (default: 1e-6)')
-    parser.add_argument('--num_loc_train', type=int, default=100,
-                        help='Number of customer locations for training (default: 100)')
-    parser.add_argument('--min_demand', type=int, default=3,
-                        help='Minimum customer demand (default: 3)')
-    parser.add_argument('--max_demand', type=int, default=30,
-                        help='Maximum customer demand (default: 30)')
-    parser.add_argument('--vehicle_capacity', type=float, default=100.0,
+    parser.add_argument('--optimizer', choices=['Adam','RMSprop'], default='Adam',
+                        help='Optimizer to use for this run (default: Adam). Options: Adam, RMSprop')
+    
+    # TRAINING DATA GENERATION #################
+    parser.add_argument('--train_data_size', type=int, default=100_000,
+                        help='Number of training instances per epoch (default: 100,000)')
+    parser.add_argument('--train_num_locs', type=int, default=100,
+                        help='Number of customer locations for training (default: 100)') ###################################### Num Locations
+    parser.add_argument('--train_vehicle_capacity', type=float, default=100.0,
                         help='Override vehicle capacity; higher allows more customers per tour (default: 100.0)')
-    parser.add_argument('--test_seed', type=int, default=1234,
-                        help='Seed for generating fixed test set (default: 1234)')
+    parser.add_argument('--train_set_clusters', type=int, default=3,
+                        help='Optional cluster count hint for training set sampler (if applicable)') ########################## Clusters
     parser.add_argument('--train_seed', type=str, default="7",
                         help='Seed for training/generator (int or "random"). Default: 7')
-    parser.add_argument('--num_train_locs', type=int, default=None,
-                        help='Alias for num_loc_train (default: None)')
-    parser.add_argument('--train_set_clusters', type=int, default=3,
-                        help='Optional cluster count hint for training set sampler (if applicable)')
-    parser.add_argument('--run_name', type=str, default=None,
-                        help='Optional run name for logger subdir (default: derived from model config)')
-    parser.add_argument('--batch_size', type=int, default=64,
-                        help='Training batch size (default: 64)')
-    parser.add_argument('--train_data_size', type=int, default=2_000_000,
-                        help='Number of training instances per epoch (default: 2,000,000)')
-    parser.add_argument('--test_data_size', type=int, default=100,
-                        help='Number of random test instances (default: 100)')
-    parser.add_argument('--train_num_starts', type=int, default=None,
-                        help='Number of POMO starts for validation (default: same as num_loc_train)')
-    parser.add_argument('--max_epochs', type=int, default=300,
-                        help='Maximum number of training epochs (default: 300)')
-    parser.add_argument('--normalization', type=str, default='batch',
-                        choices=['batch', 'layer', 'instance', 'none'],
-                        help='Normalization type for attention model (default: batch)')
-    parser.add_argument('--limit_train_batches', type=float, default=None,
-                        help='Limit fraction of training batches per epoch (default: None, use all)')
-    parser.add_argument('--log_base_dir', type=str, default='lightning_logs',
-                        help='Base directory for logging (default: lightning_logs)')
-    parser.add_argument('--train_decode_type', type=str, default='sampling',
-                        choices=['sampling', 'greedy', 'multistart_sampling', 'multistart_greedy'],
-                        help='Decode type for training (default: sampling; multistart_* will be normalized to sampling/greedy)')
-    parser.add_argument('--train_temperature', type=float, default=1.0,
-                        help='Sampling temperature for training (higher = more exploration) (default: 1.0)')
-    parser.add_argument('--val_decode_type', type=str, default='sampling',
-                        choices=['sampling', 'greedy', 'multistart_sampling', 'multistart_greedy','multistart_beam_search'],
-                        help='Decode type for validation (POMO will prepend multistart_) (default: sampling; multistart_* allowed)')
+        
+    # VALIDATION ###########################
     parser.add_argument('--val_num_samples', type=int, default=10_000,
                         help='Number of samples during validation (default: 10,000). Applies when validation uses sampling.')
     parser.add_argument('--val_temperature', type=float, default=1.0,
                         help='Sampling temperature during validation (default: 1.0)')
-    parser.add_argument('--check_val_every_n_epoch', type=int, default=1,
-                        help='Run validation every N epochs (default: 1). Set higher to reduce validation overhead.')
-    parser.add_argument('--checkpoint_after_epoch', type=int, default=0,
-                        help='Only save checkpoints after this epoch number (default: 0, save from start)')
-    parser.add_argument('--lr_reduce_factor', type=float, default=0.7,
-                        help='ReduceLROnPlateau: factor to reduce LR when plateauing (default: 0.7)')
-    parser.add_argument('--lr_reduce_patience', type=int, default=3,
-                        help='ReduceLROnPlateau: epochs with no improvement before reducing LR (default: 3)')
-    parser.add_argument('--lr_reduce_threshold', type=float, default=1e-3,
-                        help='ReduceLROnPlateau: improvement threshold to ignore (default: 1e-3)')
-    parser.add_argument('--precision', type=str, default='16-mixed',
-                        help='Precision for training (default: 16-mixed to save memory)')
-    parser.add_argument('--device', type=str, default=None,
-                        help='Device selection for this run: e.g. "cpu", "mps", "cuda", "cuda:0", or a numeric GPU index (0).')
+    
     args = parser.parse_args()
 
     # Resolve train seed (int or "random")
     if isinstance(args.train_seed, str) and args.train_seed.lower() == "random":
-        for _ in range(1):
             args.train_seed = random.randint(1, 10**9)
-    else:
-        args.train_seed = int(args.train_seed)
-    torch.manual_seed(args.train_seed)
-    random.seed(args.train_seed)
-    try:
-        import numpy as np
-        np.random.seed(args.train_seed)
-    except Exception:
-        pass
 
-    # Determine accelerator early in main so it's set before Trainer is constructed.
-    # Priority: --device CLI arg > ACCELERATOR env var > auto-detect via torch
-    acc = None
-    # 1) CLI device argument
-    if args.device:
-        dev = str(args.device)
-        # numeric index -> treat as CUDA index
-        if dev.isdigit():
-            os.environ["CUDA_VISIBLE_DEVICES"] = dev
-            acc = "cuda"
-            # expose that we selected a single device via env
-        elif dev.startswith("cuda:"):
-            idx = dev.split(":", 1)[1]
-            os.environ["CUDA_VISIBLE_DEVICES"] = idx
-            acc = "cuda"
-        elif dev in ("cuda", "cpu", "mps"):
-            acc = dev
-        else:
-            # fallback: treat as accelerator name
-            acc = dev
-    # 2) environment override
-    if acc is None:
-        acc = os.environ.get("ACCELERATOR")
-
-    # 3) auto-detect
-    if not acc:
-        if torch.cuda.is_available():
-            acc = "cuda"
-        elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
-            acc = "mps"
-        else:
-            acc = "cpu"
-
-    print(f"Using accelerator: {acc}")
-
-    # !!! Experiment Name, Pytorch Lightning Will Then Give the Version A Name !!!!
-    exp_name = args.run_name if args.run_name else f"emb{args.embedding_dim}_enc{args.num_encoder_layers}_attn{args.num_attn_heads}"
-
+    ##### ALL ARGUMENTS SHOULD BE FIXED BELOW THIS POINT #####################
+        
     val_loader, VAL_INSTANCES = create_val_loader()
 
     #loc_sampler = Mix_Multi_Distributions()
     loc_sampler = Mix_Distribution(n_cluster=args.train_set_clusters)
 
+    # CVRP Generator: https://github.com/ai4co/rl4co/blob/2def49fa2aea18ca66cb3625d8dbc34a14f63bf6/rl4co/envs/routing/cvrp/generator.py#L33
+    # Distributions: https://github.com/ai4co/rl4co/blob/2def49fa2aea18ca66cb3625d8dbc34a14f63bf6/rl4co/envs/common/utils.py#L34
     generator = CVRPGenerator(
-        num_loc=args.num_loc_train,
+        num_loc=args.train_num_locs,
+        capacity=args.train_vehicle_capacity,
+        min_demand = 3,
+        max_demand = 20,
+        demand_distribution = "exponential",
+        demand_rate = 5.0,
         loc_sampler=loc_sampler,
     )
     env = CVRPEnv(generator)
@@ -312,148 +272,83 @@ def main():
         num_layers=args.num_encoder_layers//3,
     )
     '''
+
+    # OneCycleLR needs an explicit step count; derive it from dataset size and epochs.
+    steps_per_epoch = math.ceil(args.train_data_size / args.batch_size)
+    total_steps = steps_per_epoch * args.max_epochs
+
     policy = AttentionModelPolicy(
         env_name=env.name, 
         embed_dim=args.embedding_dim,
         num_encoder_layers=args.num_encoder_layers,
         num_heads=args.num_attn_heads,
         normalization=args.normalization,
-        #train_decode_type=args.train_decode_type,
-        #val_decode_type=args.val_decode_type,
-        #test_decode_type=args.val_decode_type,
-        #temperature=args.train_temperature,
         )
     
-
     model = POMO(
         env,
         policy=policy,
         batch_size=args.batch_size,
         val_batch_size=1,
+        optimizer=args.optimizer,
         optimizer_kwargs={"lr": args.learning_rate, "weight_decay": args.weight_decay},
+        lr_scheduler="OneCycleLR",
+        lr_scheduler_kwargs = {"max_lr": args.learning_rate, "total_steps": total_steps},
         train_data_size=args.train_data_size,
         )
 
-    print("CHECKING POLICY SETUP:")
-    print(f"  policy.train_decode_type: {model.policy.train_decode_type}")
-    print(f"  policy.temperature: {model.policy.temperature}")
-    print(f"  policy.val_decode_type: {model.policy.val_decode_type}")
-    #print(f"  policy.val_num_samples: {model.policy.val_num_samples}")
-    #print(f"  policy.val_temperature: {model.policy.val_temperature}")
-    print(f"  policy.test_decode_type: {model.policy.test_decode_type}")
-
-    # Create logger first so we can pass it to callbacks
-    run_id = datetime.now().strftime("%y%m%d_%H%M")
-    run_name = f"{exp_name}_{run_id}"
     logger = WandbLogger(
-        project="cvrp-exp",
-        name=run_name,
-        save_dir=args.log_base_dir,
+        project=args.exp_name,
+        name=args.run_name,
+        save_dir=args.log_dir,
         mode="online",
         resume="never"
     )
-    run_dir = getattr(logger.experiment, "dir", logger.save_dir)
-    print(f"[INFO] Logging to: {run_dir}")
     logger.experiment.define_metric("train/reward", summary="max")
     logger.experiment.define_metric("val/reward", summary="max")
     logger.experiment.define_metric("val/10k-reward", summary="max")
+    logger.experiment.define_metric("val/10k-reward-small", summary="max")
+    logger.experiment.define_metric("val/10k-reward-large", summary="max")
 
-    
     # Prepare all hyperparameters including argparse arguments
     def _sanitize_hparams(hparams: dict):
         """Convert any non-primitive values to strings so TensorBoard HParams accepts them."""
         primals = (int, float, str, bool, type(None))
         return {k: (v if isinstance(v, primals) else str(v)) for k, v in hparams.items()}
 
-    hparams = {
-        # Model and Policy Architecture
-        "embedding_dim": args.embedding_dim,
-        "num_encoder_layers": args.num_encoder_layers,
-        "num_attn_heads": args.num_attn_heads,
-        "normalization": args.normalization,
-        
-        # Optimizer Configuration
-        "optimizer": "Adam",
-        "learning_rate": args.learning_rate,
-        "weight_decay": args.weight_decay,
-        
-        # POMO Configuration
-        "train_num_starts": args.train_num_starts,
-        "val_num_samples": args.val_num_samples,
-        "val_temperature": args.val_temperature,
-        "lr_reduce_factor": args.lr_reduce_factor,
-        "lr_reduce_patience": args.lr_reduce_patience,
-        "lr_reduce_threshold": args.lr_reduce_threshold,
-        
-        # Decode Types
-        "train_decode_type": args.train_decode_type,
-        "train_num_starts": args.train_num_starts,
-        "train_temperature": args.train_temperature,
-        
-        # Training Configuration
-        "max_epochs": args.max_epochs,
-        "num_loc_train": args.num_loc_train,
-        "batch_size": args.batch_size,
-        "train_data_size": args.train_data_size,
-        "test_data_size": args.test_data_size,
-        "test_seed": args.test_seed,
-        "train_seed": args.train_seed,
-        "train_set_clusters": args.train_set_clusters,
-        "limit_train_batches": args.limit_train_batches,
-        "check_val_every_n_epoch": args.check_val_every_n_epoch,
-        "checkpoint_after_epoch": args.checkpoint_after_epoch,
-        
-        # Data Generation
-        #"loc_sampler": str(loc_sampler),
-        "min_demand": args.min_demand,
-        "max_demand": args.max_demand,
-        "vehicle_capacity": args.vehicle_capacity,
-        
-        # Dataloader Configuration
-        "val_batch_size": 1,
-        "dataloader_num_workers": 4,
-        "val_data_size": 0,
-        
-        # Logging
-        "log_base_dir": args.log_base_dir,
-
-        # Test Instances (CVRPLib)
-        "num_test_instances": len(VAL_INSTANCES),
-        "test_instances": VAL_INSTANCES,
-        # Device used for this run (CLI arg or detected)
-        "device": (args.device if args.device is not None else acc),
-    }
+    args_dict = vars(args)
+    
+    def _sanitize_args_dict(d):
+        primals = (int, float, str, bool, type(None))
+        return {k: (v if isinstance(v, primals) else str(v)) for k, v in d.items()}
+    
+    logger.log_hyperparams(_sanitize_args_dict(args_dict))
     
     # Save YAML file with all hyperparameters
-    config_path = os.path.join(run_dir, "config.yaml")
-    os.makedirs(run_dir, exist_ok=True)
+    config_path = os.path.join(args.log_dir, "config.yaml")
     with open(config_path, 'w') as f:
-        yaml.dump(hparams, f, default_flow_style=False, sort_keys=False)
+        yaml.dump(args_dict, f, default_flow_style=False, sort_keys=False)
     print(f"Configuration saved to: {config_path}")
     
-
-    hparams_log= {
+    hparams_dict = {
             "exp_embedding_dim": args.embedding_dim,
             "exp_num_encoder_layers": args.num_encoder_layers,
             "exp_num_attn_heads": args.num_attn_heads,
             "exp_weight_decay": args.weight_decay,
-            "exp_vehicle_capacity": args.vehicle_capacity,
-            "exp_num_loc_train": args.num_loc_train,
+            "exp_train_vehicle_capacity": args.train_vehicle_capacity,
+            "exp_train_num_locs": args.train_num_locs,
             "exp_train_set_clusters": args.train_set_clusters,
-        "device": (args.device if args.device is not None else acc),
+            "exp_optimizer": args.optimizer,
         }
     
-    print("\n\n\nHYPERPARAMS TO LOG:", hparams_log,"\n\n")
+    print("\n\n\nHYPERPARAMS TO LOG:", hparams_dict,"\n\n")
     # Log hyperparameters with a starter hp_metric so HParams tab is populated
-    def _sanitize_hparams_log(d):
-        primals = (int, float, str, bool, type(None))
-        return {k: (v if isinstance(v, primals) else str(v)) for k, v in d.items()}
     
-    hparam_metrics = {"train_reward": 0.0,"val_reward":0.0,"val_10k-reward":0.0, "best-val-10k-reward":0.0, "best-val-10k-step":0.0}
-    logger.log_hyperparams(_sanitize_hparams_log(hparams_log)) #, metrics=hparam_metrics)
+    #hparam_metrics = {"train_reward": 0.0,"val_reward":0.0,"val_10k-reward":0.0, "best-val-10k-reward":0.0, "best-val-10k-step":0.0}
+    logger.log_hyperparams(hparams_dict) #, metrics=hparam_metrics)
 
     # Now create callbacks with logger
-    plot_metric_cb = CVRPMetricPlotCallback()
+    #plot_metric_cb = CVRPMetricPlotCallback()
     train_plot_graph_cb = CVRPTrainGraphPlotCallback(env, num_examples=5)
 
     '''
@@ -466,7 +361,7 @@ def main():
         use_model_solutions=True,  # Use validation solutions if available
     )
     '''
-    val_sample_cb = CVRPLibValSamplerCallback()
+    val_sample_cb = CVRPLibValSamplerCallback(args.val_num_samples,args.val_temperature)
     
     checkpoint_cb = ModelCheckpoint(
         monitor="val/10k-reward",
@@ -475,12 +370,12 @@ def main():
         save_top_k=5,
         save_last=True,
         verbose=True,
-        dirpath=os.path.join(args.log_base_dir, run_name, "checkpoints"),
+        dirpath=os.path.join(args.log_dir, args.run_name, "checkpoints"),
     )
     early_stop_cb = EarlyStopping(
         monitor="val/10k-reward",
         mode="max",
-        patience=4,
+        patience=8,
         verbose=True,
         strict=False,
     )
@@ -497,30 +392,50 @@ def main():
                      #plot_metric_cb,
                      #avg_reward_cb,
                      ]
-    
+
+    def resolve_accelerator_and_devices(device_name, device_num):
+        """Translate CLI device hints into Lightning accelerator/devices."""
+        if device_name:
+            name = device_name.lower()
+            if name == "cpu":
+                return "cpu", 1
+            if name == "mps":
+                return "mps", 1
+            if name.startswith("cuda") or name == "gpu":
+                # e.g., "cuda:1" -> [1]; fallback to device_num or single GPU
+                if ":" in device_name:
+                    try:
+                        idx = int(device_name.split(":")[1])
+                        return "gpu", [idx]
+                    except ValueError:
+                        pass
+                if device_num and device_num > 0:
+                    return "gpu", device_num
+                return "gpu", 1
+        # No explicit device name: guard against invalid 0 value
+        if device_num == 0:
+            if torch.cuda.is_available():
+                return "gpu", [0]
+            if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+                return "mps", 1
+            return "cpu", 1
+        return "auto", device_num
+
+    accelerator, devices = resolve_accelerator_and_devices(args.device_name, args.device_num)
+    print(f"Trainer hardware: accelerator={accelerator}, devices={devices}")
+
     trainer_kwargs = dict(
         max_epochs=args.max_epochs,
         callbacks=callback_list,
-        accelerator=acc,
-        # If we're not on CUDA, disable mixed-precision/autocast defaults that target CUDA
-        precision=(args.precision if acc == "cuda" else (
-            "32" if ("16" in str(args.precision).lower() or "bf16" in str(args.precision).lower()) else args.precision
-        )),
+        accelerator=accelerator,
+        devices=devices,
+        precision=args.precision,
         logger=logger,
         log_every_n_steps=50,
         limit_train_batches=args.limit_train_batches,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
         num_sanity_val_steps=0,
     )
-
-    # Notify if precision was adjusted for the chosen accelerator
-    chosen_prec = trainer_kwargs.get("precision")
-    if chosen_prec != args.precision:
-        print(f"Adjusted precision from {args.precision} to {chosen_prec} because accelerator={acc}")
-
-    # If using a hardware accelerator, request a single device
-    if acc != "cpu":
-        trainer_kwargs["devices"] = 1
 
     trainer = RL4COTrainer(**trainer_kwargs)
 

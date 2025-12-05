@@ -1,0 +1,1 @@
+{"epoch":4,"_timestamp":1.7649637233149922e+09,"_step":160,"val/reward":{"max":-52.05009841918945},"_runtime":4643,"train/loss":-0.5794885754585266,"val/10k-reward":{"max":0},"_wandb":{"runtime":4643},"trainer/global_step":7814,"train/reward":{"max":-12.408387184143066}}
