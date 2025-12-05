@@ -18,8 +18,8 @@ from rl4co.utils import RL4COTrainer
 from rl4co.data.utils import load_npz_to_tensordict  # fast RL4CO loader :contentReference[oaicite:1]{index=1}
 from rl4co.data.dataset import TensorDictDataset
 from rl4co.envs.common.distribution_utils import Mix_Multi_Distributions, Mix_Distribution
-from lightning.pytorch.loggers import TensorBoardLogger
-from lightning.pytorch.callbacks import ModelCheckpoint, RichModelSummary
+from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.callbacks import ModelCheckpoint, RichModelSummary, EarlyStopping
 
 from classes.CVRPValBaselineCallback import CVRPValBaselineCallback
 from classes.CVRPGraphPlotCallback import CVRPGraphPlotCallback
@@ -28,6 +28,7 @@ from classes.CVRPMetricPlotCallback import CVRPMetricPlotCallback
 from classes.CVRPSamplerCluster import SamplerCluster
 from classes.CVRPSamplerMixed import SamplerMixed
 from classes.CVRPTrainGraphPlotCallback import CVRPTrainGraphPlotCallback
+from classes.CVRPLibValSamplerCallback import CVRPLibValSamplerCallback
 from classes.CVRPLibHelpers import normalize_coord, vrp_to_td, batchify_td, load_val_instance
 from torch.utils.data import Dataset
 from classes.HParamsLoggerCallback import HParamsLoggerCallback
@@ -100,7 +101,12 @@ def create_val_loader():
     from torch.utils.data import Dataset
 
     # val_tds: list[TensorDict], one per CVRPLib instance
-    val_tds = [load_val_instance(p) for p in val_paths]
+    val_tds = []
+    for idx, p in enumerate(val_paths):
+        td = load_val_instance(p)
+        td.set("instance_id", torch.tensor([idx], dtype=torch.long))
+        td.set("instance_name", VAL_INSTANCES[idx])  # keep human-readable name alongside id
+        val_tds.append(td)
     print("Test (CVRPLib) set:", val_paths)
 
     val_dataset = ListTensorDictDataset(val_tds)
@@ -323,6 +329,7 @@ def main():
         env,
         policy=policy,
         batch_size=args.batch_size,
+        val_batch_size=1,
         optimizer_kwargs={"lr": args.learning_rate, "weight_decay": args.weight_decay},
         train_data_size=args.train_data_size,
         )
@@ -337,12 +344,20 @@ def main():
 
     # Create logger first so we can pass it to callbacks
     run_id = datetime.now().strftime("%y%m%d_%H%M")
-    logger = TensorBoardLogger(
+    run_name = f"{exp_name}_{run_id}"
+    logger = WandbLogger(
+        project="cvrp-exp",
+        name=run_name,
         save_dir=args.log_base_dir,
-        name=exp_name,
-        version=run_id,
+        mode="online",
+        resume="never"
     )
-    print(f"[INFO] Logging to: {logger.log_dir}")
+    run_dir = getattr(logger.experiment, "dir", logger.save_dir)
+    print(f"[INFO] Logging to: {run_dir}")
+    logger.experiment.define_metric("train/reward", summary="max")
+    logger.experiment.define_metric("val/reward", summary="max")
+    logger.experiment.define_metric("val/10k-reward", summary="max")
+
     
     # Prepare all hyperparameters including argparse arguments
     def _sanitize_hparams(hparams: dict):
@@ -410,8 +425,8 @@ def main():
     }
     
     # Save YAML file with all hyperparameters
-    config_path = os.path.join(logger.log_dir, "config.yaml")
-    os.makedirs(logger.log_dir, exist_ok=True)
+    config_path = os.path.join(run_dir, "config.yaml")
+    os.makedirs(run_dir, exist_ok=True)
     with open(config_path, 'w') as f:
         yaml.dump(hparams, f, default_flow_style=False, sort_keys=False)
     print(f"Configuration saved to: {config_path}")
@@ -433,13 +448,16 @@ def main():
     def _sanitize_hparams_log(d):
         primals = (int, float, str, bool, type(None))
         return {k: (v if isinstance(v, primals) else str(v)) for k, v in d.items()}
-    logger.log_hyperparams(_sanitize_hparams_log(hparams_log), metrics={"hp_metric": 0.0})
+    
+    hparam_metrics = {"train_reward": 0.0,"val_reward":0.0,"val_10k-reward":0.0, "best-val-10k-reward":0.0, "best-val-10k-step":0.0}
+    logger.log_hyperparams(_sanitize_hparams_log(hparams_log)) #, metrics=hparam_metrics)
 
     # Now create callbacks with logger
     plot_metric_cb = CVRPMetricPlotCallback()
     train_plot_graph_cb = CVRPTrainGraphPlotCallback(env, num_examples=5)
 
-    '''    val_plot_graph_cb = CVRPLibGraphPlotCallback(
+    '''
+    val_plot_graph_cb = CVRPLibGraphPlotCallback(
         env,
         instance_names=VAL_INSTANCES,
         sol_base_dir="cvrplib_instances/X/",  # folder with X-n101-k25.sol etc.
@@ -448,23 +466,34 @@ def main():
         use_model_solutions=True,  # Use validation solutions if available
     )
     '''
+    val_sample_cb = CVRPLibValSamplerCallback()
     
     checkpoint_cb = ModelCheckpoint(
-        monitor="val/reward",
+        monitor="val/10k-reward",
         mode="max",
-        filename="best-{epoch:02d}-{val/reward:.4f}",
+        filename="best-{epoch:02d}",
         save_top_k=5,
         save_last=True,
         verbose=True,
-        dirpath=os.path.join(logger.log_dir, "checkpoints"),
+        dirpath=os.path.join(args.log_base_dir, run_name, "checkpoints"),
+    )
+    early_stop_cb = EarlyStopping(
+        monitor="val/10k-reward",
+        mode="max",
+        patience=4,
+        verbose=True,
+        strict=False,
     )
     
-    callback_list = [checkpoint_cb, 
+    callback_list = [ 
                      #rich_model_cb,
                      #baseline_cb,
                      train_plot_graph_cb,
-                     HParamsLoggerCallback(),
+                     #HParamsLoggerCallback(),
                      #val_plot_graph_cb, 
+                     val_sample_cb,
+                     early_stop_cb,
+                     checkpoint_cb,
                      #plot_metric_cb,
                      #avg_reward_cb,
                      ]
@@ -481,6 +510,7 @@ def main():
         log_every_n_steps=50,
         limit_train_batches=args.limit_train_batches,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
+        num_sanity_val_steps=0,
     )
 
     # Notify if precision was adjusted for the chosen accelerator

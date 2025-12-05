@@ -10,10 +10,10 @@ def run_experiment():
     """Run training for all combinations of network parameters."""
 
     base_args = {
-        "max_epochs": 5,
+        "max_epochs": 100,
         "learning_rate": 1e-4,
         "batch_size": 64,
-        "train_data_size": 1_000,
+        "train_data_size": 200_000,
         "log_base_dir": "lightning_logs/small_exp2",
         "normalization": "instance",
         "train_seed": "random",
