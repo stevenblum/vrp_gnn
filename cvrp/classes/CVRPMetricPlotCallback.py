@@ -43,6 +43,9 @@ class CVRPMetricPlotCallback(Callback):
 
         # Only log when both keys are present
         if self.train_metric_key not in metrics or self.val_metric_key not in metrics:
+            print(f"[CVRPMetricPlotCallback] Missing keys at epoch {epoch}: "
+                  f"train_key_present={self.train_metric_key in metrics}, "
+                  f"val_key_present={self.val_metric_key in metrics}")
             return
 
         train_val = metrics[self.train_metric_key]
@@ -53,6 +56,9 @@ class CVRPMetricPlotCallback(Callback):
             train_val = train_val.item()
         if isinstance(val_val, torch.Tensor):
             val_val = val_val.item()
+
+        print(f"[CVRPMetricPlotCallback] Epoch {epoch} "
+              f"train={train_val:.4f} val={val_val:.4f}")
 
         self.epochs.append(epoch)
         self.train_hist.append(train_val)

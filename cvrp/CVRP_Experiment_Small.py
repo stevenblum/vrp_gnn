@@ -100,7 +100,7 @@ def run_experiment():
 
     try:
         for i, params in enumerate(combinations, 1):
-            model_name = f"combo_{i}"
+        model_name = f"combo_{i:03d}"
 
             print(f"\n[{i}/{len(combinations)}] Training: {model_name}")
             for k, v in {**base_args, **params}.items():

@@ -1,11 +1,11 @@
-exp_embedding_dim: 512
+exp_embedding_dim: 256
 exp_num_encoder_layers: 5
-exp_num_attn_heads: 16
+exp_num_attn_heads: 8
 exp_weight_decay: 1.0e-05
 exp_vehicle_capacity: 150.0
 exp_num_loc_train: 100
-exp_train_set_clusters: 4
-device: mps
+exp_train_set_clusters: 8
+device: cuda:0
 policy_kwargs: {}
 baseline: shared
 num_augment: 8
